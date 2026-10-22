@@ -1,0 +1,5 @@
+node_modules/
+cdk.out/
+dist/
+.venv/
+*.js.map

@@ -1,0 +1,36 @@
+{
+  "name": "claude-bedrock-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke": "node test/smoke/smoke-local.mjs",
+    "local": "node scripts/local.mjs"
+  },
+  "dependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@aws-sdk/client-bedrock": "^3.1147.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.1147.0",
+    "@aws-sdk/client-dynamodb": "^3.1147.0",
+    "@aws-sdk/client-marketplace-metering": "^3.1147.0",
+    "@aws-sdk/credential-provider-node": "^3.972.0",
+    "@aws-sdk/lib-dynamodb": "^3.1147.0",
+    "@smithy/node-http-handler": "^4.12.1",
+    "@smithy/protocol-http": "^5.6.0",
+    "@smithy/signature-v4": "^5.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.23.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

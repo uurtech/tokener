@@ -1,0 +1,10 @@
+node_modules/
+.env
+.DS_Store
+gateway/dist/
+gateway/data/
+infra/cdk.out/
+infra/dist/
+infra/.venv/
+# account-specific CDK lookups
+infra/cdk.context.json

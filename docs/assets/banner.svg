@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400" role="img" aria-label="tokener: a token-optimizing gateway for Claude Code on Amazon Bedrock">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="0.55" stop-color="#111c33"/>
+      <stop offset="1" stop-color="#172a4d"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.82" cy="0.2" r="0.6">
+      <stop offset="0" stop-color="#2b7de9" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#2b7de9" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="0.1" cy="1" r="0.5">
+      <stop offset="0" stop-color="#d97757" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#d97757" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="flow" gradientUnits="userSpaceOnUse" x1="286" y1="0" x2="870" y2="0">
+      <stop offset="0" stop-color="#d97757"/>
+      <stop offset="0.5" stop-color="#2b7de9"/>
+      <stop offset="1" stop-color="#ff9900"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#ffffff" stroke-opacity="0.04"/>
+    </pattern>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, "Helvetica Neue", Arial, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .dash { stroke-dasharray: 6 8; animation: move 1.6s linear infinite; }
+      @keyframes move { to { stroke-dashoffset: -28; } }
+    </style>
+  </defs>
+
+  <rect width="1280" height="400" rx="20" fill="url(#bg)"/>
+  <rect width="1280" height="400" rx="20" fill="url(#grid)"/>
+  <rect width="1280" height="400" rx="20" fill="url(#glow)"/>
+  <rect width="1280" height="400" rx="20" fill="url(#glow2)"/>
+
+  <!-- logo mark -->
+  <rect x="80" y="84" width="64" height="64" rx="16" fill="#2b7de9"/>
+  <text x="112" y="129" text-anchor="middle" class="sans" font-size="38" font-weight="700" fill="#fff">t</text>
+
+  <text x="164" y="132" class="sans" font-size="60" font-weight="800" fill="#ffffff" letter-spacing="-1.5">tokener</text>
+  <text x="82" y="194" class="sans" font-size="26" font-weight="500" fill="#c9d4ea">Claude Code on Amazon Bedrock, without the token bill shock.</text>
+  <text x="82" y="230" class="sans" font-size="18" fill="#8b9bb8">Zero-install gateway · per-developer budgets · cache-safe policies · live admin console</text>
+
+  <!-- flow -->
+  <g class="sans" font-size="16" font-weight="600">
+    <rect x="82" y="282" width="196" height="54" rx="12" fill="#ffffff" fill-opacity="0.06" stroke="#d97757" stroke-opacity="0.7"/>
+    <text x="180" y="315" text-anchor="middle" fill="#f3c7b6">Claude Code</text>
+
+    <path d="M286 309 H 452" stroke="url(#flow)" stroke-width="3" fill="none" class="dash"/>
+    <text x="369" y="296" text-anchor="middle" class="mono" font-size="12" font-weight="400" fill="#8b9bb8">HTTPS + SSE</text>
+
+    <rect x="460" y="276" width="236" height="66" rx="14" fill="#2b7de9" fill-opacity="0.18" stroke="#2b7de9"/>
+    <text x="578" y="306" text-anchor="middle" fill="#ffffff" font-size="18" font-weight="700">tokener</text>
+    <text x="578" y="327" text-anchor="middle" class="mono" font-size="11" font-weight="400" fill="#a9c6f5">auth ▸ policy ▸ budget ▸ meter</text>
+
+    <path d="M704 309 H 870" stroke="url(#flow)" stroke-width="3" fill="none" class="dash"/>
+    <text x="787" y="296" text-anchor="middle" class="mono" font-size="12" font-weight="400" fill="#8b9bb8">SigV4 / API key</text>
+
+    <rect x="878" y="282" width="220" height="54" rx="12" fill="#ffffff" fill-opacity="0.06" stroke="#ff9900" stroke-opacity="0.8"/>
+    <text x="988" y="315" text-anchor="middle" fill="#ffd699">Amazon Bedrock</text>
+  </g>
+
+  <!-- stat chips -->
+  <g class="sans" font-size="14" font-weight="600">
+    <rect x="1000" y="84" width="200" height="40" rx="20" fill="#16a34a" fill-opacity="0.16" stroke="#16a34a" stroke-opacity="0.6"/>
+    <text x="1100" y="109" text-anchor="middle" fill="#86efac">−15–35% token cost</text>
+    <rect x="1000" y="136" width="200" height="40" rx="20" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.2"/>
+    <text x="1100" y="161" text-anchor="middle" fill="#c9d4ea">~$75/mo infra</text>
+    <rect x="1000" y="188" width="200" height="40" rx="20" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.2"/>
+    <text x="1100" y="213" text-anchor="middle" fill="#c9d4ea">0 installs per dev</text>
+  </g>
+</svg>

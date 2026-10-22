@@ -1,0 +1,2466 @@
+{
+  "Description": "tokener 0.1.0 - Claude Code to Amazon Bedrock token-optimisation gateway (ECS Fargate, ALB, DynamoDB, CloudWatch). AWS Marketplace container product.",
+  "Metadata": {
+    "AWS::CloudFormation::Interface": {
+      "ParameterGroups": [
+        {
+          "Label": {
+            "default": "Endpoint"
+          },
+          "Parameters": [
+            "CertificateArn",
+            "DomainName",
+            "AdminAllowedCidrs"
+          ]
+        },
+        {
+          "Label": {
+            "default": "Bedrock"
+          },
+          "Parameters": [
+            "UpstreamMode",
+            "BedrockProfilePrefix"
+          ]
+        },
+        {
+          "Label": {
+            "default": "Capacity and cost"
+          },
+          "Parameters": [
+            "DesiredCount",
+            "NatGateways",
+            "TeamDailyAlertUsd",
+            "AlertEmail"
+          ]
+        },
+        {
+          "Label": {
+            "default": "Security (optional)"
+          },
+          "Parameters": [
+            "ExistingTaskRoleArn",
+            "PermissionsBoundaryArn"
+          ]
+        },
+        {
+          "Label": {
+            "default": "Marketplace (do not change)"
+          },
+          "Parameters": [
+            "ContainerImage",
+            "MarketplaceProductCode"
+          ]
+        }
+      ],
+      "ParameterLabels": {
+        "CertificateArn": {
+          "default": "ACM certificate ARN"
+        },
+        "DomainName": {
+          "default": "Gateway hostname"
+        },
+        "AdminAllowedCidrs": {
+          "default": "Admin UI allowed CIDRs"
+        },
+        "UpstreamMode": {
+          "default": "Default Bedrock API"
+        },
+        "BedrockProfilePrefix": {
+          "default": "Inference-profile prefix"
+        },
+        "DesiredCount": {
+          "default": "Gateway tasks"
+        },
+        "NatGateways": {
+          "default": "NAT gateways"
+        },
+        "TeamDailyAlertUsd": {
+          "default": "Daily spend alarm (USD)"
+        },
+        "AlertEmail": {
+          "default": "Alert e-mail"
+        },
+        "ExistingTaskRoleArn": {
+          "default": "Existing task role ARN"
+        },
+        "PermissionsBoundaryArn": {
+          "default": "Permissions boundary ARN"
+        },
+        "ContainerImage": {
+          "default": "Container image"
+        },
+        "MarketplaceProductCode": {
+          "default": "Marketplace product code"
+        }
+      }
+    }
+  },
+  "Parameters": {
+    "ContainerImage": {
+      "Type": "String",
+      "Default": "tokener:0.1.0",
+      "Description": "Container image URI (AWS Marketplace ECR). Leave the default unless support tells you otherwise."
+    },
+    "MarketplaceProductCode": {
+      "Type": "String",
+      "Default": "",
+      "Description": "AWS Marketplace product code for usage registration. Pre-filled by the listing; leave empty only for BYOL / evaluation builds."
+    },
+    "CertificateArn": {
+      "Type": "String",
+      "AllowedPattern": "^arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/.+$",
+      "ConstraintDescription": "must be an ACM certificate ARN in this region",
+      "Description": "ACM certificate ARN for the gateway hostname. HTTPS is mandatory: developer tokens travel in this connection."
+    },
+    "DomainName": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Hostname developers will use (e.g. claude-gw.example.com). Create a DNS CNAME to the LoadBalancerDns output after deployment."
+    },
+    "AdminAllowedCidrs": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}(,([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2})*$",
+      "ConstraintDescription": "comma-separated IPv4 CIDRs, or empty to disable the admin UI",
+      "Description": "Comma-separated CIDRs allowed to reach the admin UI and API (/admin). Empty disables /admin at the load balancer (returns 403)."
+    },
+    "AlertEmail": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Optional e-mail for CloudWatch alarms (spend, errors, unhealthy tasks). You will receive an SNS confirmation."
+    },
+    "DesiredCount": {
+      "Type": "Number",
+      "Default": 2,
+      "Description": "Number of gateway tasks. 2 gives zero-downtime deploys; 1 is enough for evaluation.",
+      "MaxValue": 6,
+      "MinValue": 1
+    },
+    "NatGateways": {
+      "Type": "String",
+      "Default": "1",
+      "AllowedValues": [
+        "1",
+        "2"
+      ],
+      "Description": "NAT gateways for the private subnets. 1 is cheaper; 2 survives an AZ outage."
+    },
+    "UpstreamMode": {
+      "Type": "String",
+      "Default": "mantle",
+      "AllowedValues": [
+        "mantle",
+        "runtime"
+      ],
+      "Description": "Bedrock API used by default: mantle (Anthropic Messages API on Bedrock) or runtime (classic InvokeModel). Changeable later in the admin UI."
+    },
+    "BedrockProfilePrefix": {
+      "Type": "String",
+      "Default": "us",
+      "AllowedValues": [
+        "us",
+        "global",
+        "eu",
+        "apac",
+        "none"
+      ],
+      "Description": "Inference-profile prefix for runtime mode. Pick the one matching your region's cross-region profiles."
+    },
+    "TeamDailyAlertUsd": {
+      "Type": "Number",
+      "Default": 150,
+      "Description": "Alarm when the team's estimated daily Bedrock spend (USD) crosses this value.",
+      "MinValue": 1
+    },
+    "ExistingTaskRoleArn": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Optional: ARN of an IAM role you manage for the gateway tasks. Empty = the stack creates a least-privilege role. See the documentation for the required permissions."
+    },
+    "PermissionsBoundaryArn": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Optional: permissions boundary policy ARN applied to every IAM role this stack creates."
+    }
+  },
+  "Conditions": {
+    "HasAdminCidr": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "AdminAllowedCidrs"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "HasAlertEmail": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "AlertEmail"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "HasDomainName": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "DomainName"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "HasExistingTaskRole": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "ExistingTaskRoleArn"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "HasPermissionsBoundary": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "PermissionsBoundaryArn"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "TwoNatGateways": {
+      "Fn::Equals": [
+        {
+          "Ref": "NatGateways"
+        },
+        "2"
+      ]
+    }
+  },
+  "Resources": {
+    "Vpc8378EB38": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "CidrBlock": "10.0.0.0/16",
+        "EnableDnsHostnames": true,
+        "EnableDnsSupport": true,
+        "InstanceTenancy": "default",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/Resource"
+      }
+    },
+    "VpcpublicSubnet1Subnet2BB74ED7": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "AvailabilityZone": {
+          "Fn::Select": [
+            0,
+            {
+              "Fn::GetAZs": ""
+            }
+          ]
+        },
+        "CidrBlock": "10.0.0.0/24",
+        "MapPublicIpOnLaunch": true,
+        "Tags": [
+          {
+            "Key": "aws-cdk:subnet-name",
+            "Value": "public"
+          },
+          {
+            "Key": "aws-cdk:subnet-type",
+            "Value": "Public"
+          },
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc/publicSubnet1"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/publicSubnet1/Subnet"
+      }
+    },
+    "VpcpublicSubnet1RouteTable15C15F8E": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc/publicSubnet1"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/publicSubnet1/RouteTable"
+      }
+    },
+    "VpcpublicSubnet1RouteTableAssociation4E83B6E4": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "VpcpublicSubnet1RouteTable15C15F8E"
+        },
+        "SubnetId": {
+          "Ref": "VpcpublicSubnet1Subnet2BB74ED7"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/publicSubnet1/RouteTableAssociation"
+      }
+    },
+    "VpcpublicSubnet1DefaultRouteB88F9E93": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "VpcIGWD7BA715C"
+        },
+        "RouteTableId": {
+          "Ref": "VpcpublicSubnet1RouteTable15C15F8E"
+        }
+      },
+      "DependsOn": [
+        "VpcVPCGWBF912B6E"
+      ],
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/publicSubnet1/DefaultRoute"
+      }
+    },
+    "VpcpublicSubnet1EIP411541E6": {
+      "Type": "AWS::EC2::EIP",
+      "Properties": {
+        "Domain": "vpc",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc/publicSubnet1"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/publicSubnet1/EIP"
+      }
+    },
+    "VpcpublicSubnet1NATGatewayA036E8A6": {
+      "Type": "AWS::EC2::NatGateway",
+      "Properties": {
+        "AllocationId": {
+          "Fn::GetAtt": [
+            "VpcpublicSubnet1EIP411541E6",
+            "AllocationId"
+          ]
+        },
+        "SubnetId": {
+          "Ref": "VpcpublicSubnet1Subnet2BB74ED7"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc/publicSubnet1"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "DependsOn": [
+        "VpcpublicSubnet1DefaultRouteB88F9E93",
+        "VpcpublicSubnet1RouteTableAssociation4E83B6E4"
+      ],
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/publicSubnet1/NATGateway"
+      }
+    },
+    "VpcpublicSubnet2SubnetE34B022A": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "AvailabilityZone": {
+          "Fn::Select": [
+            1,
+            {
+              "Fn::GetAZs": ""
+            }
+          ]
+        },
+        "CidrBlock": "10.0.1.0/24",
+        "MapPublicIpOnLaunch": true,
+        "Tags": [
+          {
+            "Key": "aws-cdk:subnet-name",
+            "Value": "public"
+          },
+          {
+            "Key": "aws-cdk:subnet-type",
+            "Value": "Public"
+          },
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc/publicSubnet2"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/publicSubnet2/Subnet"
+      }
+    },
+    "VpcpublicSubnet2RouteTableC5A6DF77": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc/publicSubnet2"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/publicSubnet2/RouteTable"
+      }
+    },
+    "VpcpublicSubnet2RouteTableAssociationCCE257FF": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "VpcpublicSubnet2RouteTableC5A6DF77"
+        },
+        "SubnetId": {
+          "Ref": "VpcpublicSubnet2SubnetE34B022A"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/publicSubnet2/RouteTableAssociation"
+      }
+    },
+    "VpcpublicSubnet2DefaultRoute732F0BEB": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "VpcIGWD7BA715C"
+        },
+        "RouteTableId": {
+          "Ref": "VpcpublicSubnet2RouteTableC5A6DF77"
+        }
+      },
+      "DependsOn": [
+        "VpcVPCGWBF912B6E"
+      ],
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/publicSubnet2/DefaultRoute"
+      }
+    },
+    "VpcpublicSubnet2EIP811E07A7": {
+      "Type": "AWS::EC2::EIP",
+      "Properties": {
+        "Domain": "vpc",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc/publicSubnet2"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/publicSubnet2/EIP"
+      },
+      "Condition": "TwoNatGateways"
+    },
+    "VpcpublicSubnet2NATGateway4A29FD4F": {
+      "Type": "AWS::EC2::NatGateway",
+      "Properties": {
+        "AllocationId": {
+          "Fn::GetAtt": [
+            "VpcpublicSubnet2EIP811E07A7",
+            "AllocationId"
+          ]
+        },
+        "SubnetId": {
+          "Ref": "VpcpublicSubnet2SubnetE34B022A"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc/publicSubnet2"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "DependsOn": [
+        "VpcpublicSubnet2DefaultRoute732F0BEB",
+        "VpcpublicSubnet2RouteTableAssociationCCE257FF"
+      ],
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/publicSubnet2/NATGateway"
+      },
+      "Condition": "TwoNatGateways"
+    },
+    "VpcprivateSubnet1SubnetCEAD3716": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "AvailabilityZone": {
+          "Fn::Select": [
+            0,
+            {
+              "Fn::GetAZs": ""
+            }
+          ]
+        },
+        "CidrBlock": "10.0.2.0/24",
+        "MapPublicIpOnLaunch": false,
+        "Tags": [
+          {
+            "Key": "aws-cdk:subnet-name",
+            "Value": "private"
+          },
+          {
+            "Key": "aws-cdk:subnet-type",
+            "Value": "Private"
+          },
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc/privateSubnet1"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/privateSubnet1/Subnet"
+      }
+    },
+    "VpcprivateSubnet1RouteTable1979EACB": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc/privateSubnet1"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/privateSubnet1/RouteTable"
+      }
+    },
+    "VpcprivateSubnet1RouteTableAssociationEEBD93CE": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "VpcprivateSubnet1RouteTable1979EACB"
+        },
+        "SubnetId": {
+          "Ref": "VpcprivateSubnet1SubnetCEAD3716"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/privateSubnet1/RouteTableAssociation"
+      }
+    },
+    "VpcprivateSubnet1DefaultRouteB506891A": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "NatGatewayId": {
+          "Ref": "VpcpublicSubnet1NATGatewayA036E8A6"
+        },
+        "RouteTableId": {
+          "Ref": "VpcprivateSubnet1RouteTable1979EACB"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/privateSubnet1/DefaultRoute"
+      }
+    },
+    "VpcprivateSubnet2Subnet2DE7549C": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "AvailabilityZone": {
+          "Fn::Select": [
+            1,
+            {
+              "Fn::GetAZs": ""
+            }
+          ]
+        },
+        "CidrBlock": "10.0.3.0/24",
+        "MapPublicIpOnLaunch": false,
+        "Tags": [
+          {
+            "Key": "aws-cdk:subnet-name",
+            "Value": "private"
+          },
+          {
+            "Key": "aws-cdk:subnet-type",
+            "Value": "Private"
+          },
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc/privateSubnet2"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/privateSubnet2/Subnet"
+      }
+    },
+    "VpcprivateSubnet2RouteTable4D0FFC8C": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc/privateSubnet2"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/privateSubnet2/RouteTable"
+      }
+    },
+    "VpcprivateSubnet2RouteTableAssociationB691E645": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "VpcprivateSubnet2RouteTable4D0FFC8C"
+        },
+        "SubnetId": {
+          "Ref": "VpcprivateSubnet2Subnet2DE7549C"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/privateSubnet2/RouteTableAssociation"
+      }
+    },
+    "VpcprivateSubnet2DefaultRouteBAC3C1C3": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "NatGatewayId": {
+          "Fn::If": [
+            "TwoNatGateways",
+            {
+              "Ref": "VpcpublicSubnet2NATGateway4A29FD4F"
+            },
+            {
+              "Ref": "VpcpublicSubnet1NATGatewayA036E8A6"
+            }
+          ]
+        },
+        "RouteTableId": {
+          "Ref": "VpcprivateSubnet2RouteTable4D0FFC8C"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/privateSubnet2/DefaultRoute"
+      }
+    },
+    "VpcIGWD7BA715C": {
+      "Type": "AWS::EC2::InternetGateway",
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": "tokener-marketplace/Vpc"
+          },
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/IGW"
+      }
+    },
+    "VpcVPCGWBF912B6E": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "InternetGatewayId": {
+          "Ref": "VpcIGWD7BA715C"
+        },
+        "VpcId": {
+          "Ref": "Vpc8378EB38"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Vpc/VPCGW"
+      }
+    },
+    "Keys4E30B592": {
+      "Type": "AWS::DynamoDB::GlobalTable",
+      "Properties": {
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "keyHash",
+            "AttributeType": "S"
+          }
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+        "KeySchema": [
+          {
+            "AttributeName": "keyHash",
+            "KeyType": "HASH"
+          }
+        ],
+        "Replicas": [
+          {
+            "PointInTimeRecoverySpecification": {
+              "PointInTimeRecoveryEnabled": true
+            },
+            "Region": {
+              "Ref": "AWS::Region"
+            },
+            "Tags": [
+              {
+                "Key": "Product",
+                "Value": "tokener"
+              },
+              {
+                "Key": "ProductVersion",
+                "Value": "0.1.0"
+              }
+            ]
+          }
+        ]
+      },
+      "UpdateReplacePolicy": "Retain",
+      "DeletionPolicy": "Retain",
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Keys/Resource"
+      }
+    },
+    "Usage04F2BA28": {
+      "Type": "AWS::DynamoDB::GlobalTable",
+      "Properties": {
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "pk",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "sk",
+            "AttributeType": "S"
+          }
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+        "KeySchema": [
+          {
+            "AttributeName": "pk",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "sk",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Replicas": [
+          {
+            "Region": {
+              "Ref": "AWS::Region"
+            },
+            "Tags": [
+              {
+                "Key": "Product",
+                "Value": "tokener"
+              },
+              {
+                "Key": "ProductVersion",
+                "Value": "0.1.0"
+              }
+            ]
+          }
+        ]
+      },
+      "UpdateReplacePolicy": "Retain",
+      "DeletionPolicy": "Retain",
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Usage/Resource"
+      }
+    },
+    "AdminToken38B307E8": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Properties": {
+        "Description": "tokener admin UI bearer token (generated at deploy time)",
+        "GenerateSecretString": {
+          "ExcludePunctuation": true,
+          "IncludeSpace": false,
+          "PasswordLength": 40
+        },
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "UpdateReplacePolicy": "Delete",
+      "DeletionPolicy": "Delete",
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/AdminToken/Resource"
+      }
+    },
+    "TaskRole30FC0FBB": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              }
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "Description": "tokener gateway task role: Bedrock inference, model catalog, usage tables, Marketplace metering",
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition"
+                },
+                ":iam::aws:policy/AWSMarketplaceMeteringRegisterUsage"
+              ]
+            ]
+          }
+        ],
+        "PermissionsBoundary": {
+          "Fn::If": [
+            "HasPermissionsBoundary",
+            {
+              "Ref": "PermissionsBoundaryArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/TaskRole/Resource"
+      }
+    },
+    "TaskRoleDefaultPolicy07FC53DE": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "bedrock-mantle:CountTokens",
+                "bedrock-mantle:CreateInference"
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition"
+                    },
+                    ":bedrock-mantle:",
+                    {
+                      "Ref": "AWS::Region"
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId"
+                    },
+                    ":project/*"
+                  ]
+                ]
+              },
+              "Sid": "BedrockMantleMessagesApi"
+            },
+            {
+              "Action": [
+                "bedrock:CountTokens",
+                "bedrock:InvokeModel",
+                "bedrock:InvokeModelWithResponseStream"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition"
+                      },
+                      ":bedrock:*:",
+                      {
+                        "Ref": "AWS::AccountId"
+                      },
+                      ":inference-profile/*"
+                    ]
+                  ]
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition"
+                      },
+                      ":bedrock:*::foundation-model/anthropic.*"
+                    ]
+                  ]
+                }
+              ],
+              "Sid": "BedrockRuntimeInvoke"
+            },
+            {
+              "Action": [
+                "bedrock:ListFoundationModels",
+                "bedrock:ListInferenceProfiles"
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "BedrockModelCatalog"
+            },
+            {
+              "Action": [
+                "aws-marketplace:Subscribe",
+                "aws-marketplace:ViewSubscriptions"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:CalledViaLast": "bedrock.amazonaws.com"
+                }
+              },
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "AnthropicModelSubscriptionViaBedrock"
+            },
+            {
+              "Action": [
+                "dynamodb:BatchGetItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DescribeTable",
+                "dynamodb:GetItem",
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+                "dynamodb:PutItem",
+                "dynamodb:Query",
+                "dynamodb:Scan",
+                "dynamodb:UpdateItem"
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Keys4E30B592",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::GetAtt": [
+                    "Usage04F2BA28",
+                    "Arn"
+                  ]
+                }
+              ]
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "PolicyName": "TaskRoleDefaultPolicy07FC53DE",
+        "Roles": [
+          {
+            "Ref": "TaskRole30FC0FBB"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/TaskRole/DefaultPolicy/Resource"
+      }
+    },
+    "ExecutionRole605A040B": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              }
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "Description": "tokener task execution role: pull the Marketplace image, write logs, read the admin token",
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition"
+                },
+                ":iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+              ]
+            ]
+          }
+        ],
+        "PermissionsBoundary": {
+          "Fn::If": [
+            "HasPermissionsBoundary",
+            {
+              "Ref": "PermissionsBoundaryArn"
+            },
+            {
+              "Ref": "AWS::NoValue"
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/ExecutionRole/Resource"
+      }
+    },
+    "ExecutionRoleDefaultPolicyA5B92313": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "secretsmanager:DescribeSecret",
+                "secretsmanager:GetSecretValue"
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "AdminToken38B307E8"
+              }
+            },
+            {
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "Logs6819BB44",
+                  "Arn"
+                ]
+              }
+            }
+          ],
+          "Version": "2012-10-17"
+        },
+        "PolicyName": "ExecutionRoleDefaultPolicyA5B92313",
+        "Roles": [
+          {
+            "Ref": "ExecutionRole605A040B"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/ExecutionRole/DefaultPolicy/Resource"
+      }
+    },
+    "ClusterEB0386A7": {
+      "Type": "AWS::ECS::Cluster",
+      "Properties": {
+        "ClusterSettings": [
+          {
+            "Name": "containerInsights",
+            "Value": "enabled"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Cluster/Resource"
+      }
+    },
+    "Logs6819BB44": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "RetentionInDays": 90,
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "UpdateReplacePolicy": "Delete",
+      "DeletionPolicy": "Delete",
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Logs/Resource"
+      }
+    },
+    "TaskDef54694570": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Properties": {
+        "ContainerDefinitions": [
+          {
+            "Environment": [
+              {
+                "Name": "PORT",
+                "Value": "8080"
+              },
+              {
+                "Name": "AWS_REGION",
+                "Value": {
+                  "Ref": "AWS::Region"
+                }
+              },
+              {
+                "Name": "KEYS_TABLE",
+                "Value": {
+                  "Ref": "Keys4E30B592"
+                }
+              },
+              {
+                "Name": "USAGE_TABLE",
+                "Value": {
+                  "Ref": "Usage04F2BA28"
+                }
+              },
+              {
+                "Name": "METRICS_NAMESPACE",
+                "Value": "tokener"
+              },
+              {
+                "Name": "NODE_OPTIONS",
+                "Value": "--max-old-space-size=768"
+              },
+              {
+                "Name": "UPSTREAM_MODE",
+                "Value": {
+                  "Ref": "UpstreamMode"
+                }
+              },
+              {
+                "Name": "BEDROCK_PROFILE_PREFIX",
+                "Value": {
+                  "Ref": "BedrockProfilePrefix"
+                }
+              },
+              {
+                "Name": "MARKETPLACE_PRODUCT_CODE",
+                "Value": {
+                  "Ref": "MarketplaceProductCode"
+                }
+              },
+              {
+                "Name": "MARKETPLACE_PUBLIC_KEY_VERSION",
+                "Value": "1"
+              },
+              {
+                "Name": "BRIDGE_BEDROCK",
+                "Value": "true"
+              },
+              {
+                "Name": "EFFORT_MODE",
+                "Value": "off"
+              },
+              {
+                "Name": "BUDGET_ACTION",
+                "Value": "warn"
+              }
+            ],
+            "Essential": true,
+            "HealthCheck": {
+              "Command": [
+                "CMD-SHELL",
+                "wget -qO- http://127.0.0.1:8080/health || exit 1"
+              ],
+              "Interval": 30,
+              "Retries": 3,
+              "StartPeriod": 20,
+              "Timeout": 5
+            },
+            "Image": {
+              "Ref": "ContainerImage"
+            },
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "Logs6819BB44"
+                },
+                "awslogs-stream-prefix": "gateway",
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                }
+              }
+            },
+            "Name": "gateway",
+            "PortMappings": [
+              {
+                "ContainerPort": 8080,
+                "Protocol": "tcp"
+              }
+            ],
+            "Secrets": [
+              {
+                "Name": "ADMIN_TOKEN",
+                "ValueFrom": {
+                  "Ref": "AdminToken38B307E8"
+                }
+              }
+            ]
+          }
+        ],
+        "Cpu": "512",
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": [
+            "ExecutionRole605A040B",
+            "Arn"
+          ]
+        },
+        "Family": "tokenermarketplaceTaskDef1C1A14F0",
+        "Memory": "1024",
+        "NetworkMode": "awsvpc",
+        "RequiresCompatibilities": [
+          "FARGATE"
+        ],
+        "RuntimePlatform": {
+          "CpuArchitecture": "X86_64",
+          "OperatingSystemFamily": "LINUX"
+        },
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "TaskRoleArn": {
+          "Fn::If": [
+            "HasExistingTaskRole",
+            {
+              "Ref": "ExistingTaskRoleArn"
+            },
+            {
+              "Fn::GetAtt": [
+                "TaskRole30FC0FBB",
+                "Arn"
+              ]
+            }
+          ]
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/TaskDef/Resource"
+      }
+    },
+    "ServiceLBE9A1ADBC": {
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Properties": {
+        "LoadBalancerAttributes": [
+          {
+            "Key": "deletion_protection.enabled",
+            "Value": "false"
+          },
+          {
+            "Key": "idle_timeout.timeout_seconds",
+            "Value": "900"
+          },
+          {
+            "Key": "routing.http.drop_invalid_header_fields.enabled",
+            "Value": "true"
+          }
+        ],
+        "Scheme": "internet-facing",
+        "SecurityGroups": [
+          {
+            "Fn::GetAtt": [
+              "ServiceLBSecurityGroupF7435A5C",
+              "GroupId"
+            ]
+          }
+        ],
+        "Subnets": [
+          {
+            "Ref": "VpcpublicSubnet1Subnet2BB74ED7"
+          },
+          {
+            "Ref": "VpcpublicSubnet2SubnetE34B022A"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "Type": "application"
+      },
+      "DependsOn": [
+        "VpcpublicSubnet1DefaultRouteB88F9E93",
+        "VpcpublicSubnet1RouteTableAssociation4E83B6E4",
+        "VpcpublicSubnet2DefaultRoute732F0BEB",
+        "VpcpublicSubnet2RouteTableAssociationCCE257FF"
+      ],
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Service/LB/Resource"
+      }
+    },
+    "ServiceLBSecurityGroupF7435A5C": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Automatically created Security Group for ELB tokenermarketplaceServiceLBCC216427",
+        "SecurityGroupIngress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "Allow from anyone on port 443",
+            "FromPort": 443,
+            "IpProtocol": "tcp",
+            "ToPort": 443
+          },
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "Allow from anyone on port 80",
+            "FromPort": 80,
+            "IpProtocol": "tcp",
+            "ToPort": 80
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Service/LB/SecurityGroup/Resource"
+      }
+    },
+    "ServiceLBSecurityGrouptotokenermarketplaceServiceSecurityGroup3E039A78808029F9CAC3": {
+      "Type": "AWS::EC2::SecurityGroupEgress",
+      "Properties": {
+        "Description": "Load balancer to target",
+        "DestinationSecurityGroupId": {
+          "Fn::GetAtt": [
+            "ServiceSecurityGroupEEA09B68",
+            "GroupId"
+          ]
+        },
+        "FromPort": 8080,
+        "GroupId": {
+          "Fn::GetAtt": [
+            "ServiceLBSecurityGroupF7435A5C",
+            "GroupId"
+          ]
+        },
+        "IpProtocol": "tcp",
+        "ToPort": 8080
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Service/LB/SecurityGroup/to tokenermarketplaceServiceSecurityGroup3E039A78:8080"
+      }
+    },
+    "ServiceLBPublicListener46709EAA": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties": {
+        "Certificates": [
+          {
+            "CertificateArn": {
+              "Ref": "CertificateArn"
+            }
+          }
+        ],
+        "DefaultActions": [
+          {
+            "TargetGroupArn": {
+              "Ref": "ServiceLBPublicListenerECSGroup0CC8688C"
+            },
+            "Type": "forward"
+          }
+        ],
+        "LoadBalancerArn": {
+          "Ref": "ServiceLBE9A1ADBC"
+        },
+        "Port": 443,
+        "Protocol": "HTTPS",
+        "SslPolicy": "ELBSecurityPolicy-TLS13-1-2-Res-2021-06",
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Service/LB/PublicListener/Resource"
+      }
+    },
+    "ServiceLBPublicListenerECSGroup0CC8688C": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "HealthCheckIntervalSeconds": 15,
+        "HealthCheckPath": "/health",
+        "HealthyThresholdCount": 2,
+        "Port": 80,
+        "Protocol": "HTTP",
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "TargetGroupAttributes": [
+          {
+            "Key": "stickiness.enabled",
+            "Value": "false"
+          },
+          {
+            "Key": "deregistration_delay.timeout_seconds",
+            "Value": "30"
+          }
+        ],
+        "TargetType": "ip",
+        "UnhealthyThresholdCount": 3,
+        "VpcId": {
+          "Ref": "Vpc8378EB38"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Service/LB/PublicListener/ECSGroup/Resource"
+      }
+    },
+    "ServiceLBPublicRedirectListenerF055B333": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties": {
+        "DefaultActions": [
+          {
+            "RedirectConfig": {
+              "Port": "443",
+              "Protocol": "HTTPS",
+              "StatusCode": "HTTP_301"
+            },
+            "Type": "redirect"
+          }
+        ],
+        "LoadBalancerArn": {
+          "Ref": "ServiceLBE9A1ADBC"
+        },
+        "Port": 80,
+        "Protocol": "HTTP",
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "DependsOn": [
+        "ServiceLBPublicListenerECSGroup0CC8688C",
+        "ServiceLBPublicListener46709EAA"
+      ],
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Service/LB/PublicRedirectListener/Resource"
+      }
+    },
+    "Service9571FDD8": {
+      "Type": "AWS::ECS::Service",
+      "Properties": {
+        "Cluster": {
+          "Ref": "ClusterEB0386A7"
+        },
+        "DeploymentConfiguration": {
+          "Alarms": {
+            "AlarmNames": [],
+            "Enable": false,
+            "Rollback": false
+          },
+          "DeploymentCircuitBreaker": {
+            "Enable": true,
+            "Rollback": true
+          },
+          "MaximumPercent": 200,
+          "MinimumHealthyPercent": 100
+        },
+        "DeploymentController": {
+          "Type": "ECS"
+        },
+        "DesiredCount": {
+          "Ref": "DesiredCount"
+        },
+        "EnableECSManagedTags": false,
+        "HealthCheckGracePeriodSeconds": 60,
+        "LaunchType": "FARGATE",
+        "LoadBalancers": [
+          {
+            "ContainerName": "gateway",
+            "ContainerPort": 8080,
+            "TargetGroupArn": {
+              "Ref": "ServiceLBPublicListenerECSGroup0CC8688C"
+            }
+          }
+        ],
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "DISABLED",
+            "SecurityGroups": [
+              {
+                "Fn::GetAtt": [
+                  "ServiceSecurityGroupEEA09B68",
+                  "GroupId"
+                ]
+              }
+            ],
+            "Subnets": [
+              {
+                "Ref": "VpcprivateSubnet1SubnetCEAD3716"
+              },
+              {
+                "Ref": "VpcprivateSubnet2Subnet2DE7549C"
+              }
+            ]
+          }
+        },
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "TaskDefinition": {
+          "Ref": "TaskDef54694570"
+        }
+      },
+      "DependsOn": [
+        "AdminAllowF90EBCDB",
+        "ServiceLBPublicListenerECSGroup0CC8688C",
+        "ServiceLBPublicListener46709EAA",
+        "TaskRoleDefaultPolicy07FC53DE",
+        "TaskRole30FC0FBB"
+      ],
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Service/Service/Service"
+      }
+    },
+    "ServiceSecurityGroupEEA09B68": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "tokener-marketplace/Service/Service/SecurityGroup",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "Allow all outbound traffic by default",
+            "IpProtocol": "-1"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "VpcId": {
+          "Ref": "Vpc8378EB38"
+        }
+      },
+      "DependsOn": [
+        "TaskRoleDefaultPolicy07FC53DE",
+        "TaskRole30FC0FBB"
+      ],
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Service/Service/SecurityGroup/Resource"
+      }
+    },
+    "ServiceSecurityGroupfromtokenermarketplaceServiceLBSecurityGroup2D4DDD7280804C31029D": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "Description": "Load balancer to target",
+        "FromPort": 8080,
+        "GroupId": {
+          "Fn::GetAtt": [
+            "ServiceSecurityGroupEEA09B68",
+            "GroupId"
+          ]
+        },
+        "IpProtocol": "tcp",
+        "SourceSecurityGroupId": {
+          "Fn::GetAtt": [
+            "ServiceLBSecurityGroupF7435A5C",
+            "GroupId"
+          ]
+        },
+        "ToPort": 8080
+      },
+      "DependsOn": [
+        "TaskRoleDefaultPolicy07FC53DE",
+        "TaskRole30FC0FBB"
+      ],
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Service/Service/SecurityGroup/from tokenermarketplaceServiceLBSecurityGroup2D4DDD72:8080"
+      }
+    },
+    "ServiceTaskCountTargetDF7542A8": {
+      "Type": "AWS::ApplicationAutoScaling::ScalableTarget",
+      "Properties": {
+        "MaxCapacity": 6,
+        "MinCapacity": 1,
+        "ResourceId": {
+          "Fn::Join": [
+            "",
+            [
+              "service/",
+              {
+                "Ref": "ClusterEB0386A7"
+              },
+              "/",
+              {
+                "Fn::GetAtt": [
+                  "Service9571FDD8",
+                  "Name"
+                ]
+              }
+            ]
+          ]
+        },
+        "RoleARN": {
+          "Fn::Join": [
+            "",
+            [
+              "arn:",
+              {
+                "Ref": "AWS::Partition"
+              },
+              ":iam::",
+              {
+                "Ref": "AWS::AccountId"
+              },
+              ":role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+            ]
+          ]
+        },
+        "ScalableDimension": "ecs:service:DesiredCount",
+        "ServiceNamespace": "ecs",
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "DependsOn": [
+        "TaskRoleDefaultPolicy07FC53DE",
+        "TaskRole30FC0FBB"
+      ],
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Service/Service/TaskCount/Target/Resource"
+      }
+    },
+    "ServiceTaskCountTargetCpu3C0D3B0E": {
+      "Type": "AWS::ApplicationAutoScaling::ScalingPolicy",
+      "Properties": {
+        "PolicyName": "tokenermarketplaceServiceTaskCountTargetCpu75A441DB",
+        "PolicyType": "TargetTrackingScaling",
+        "ScalingTargetId": {
+          "Ref": "ServiceTaskCountTargetDF7542A8"
+        },
+        "TargetTrackingScalingPolicyConfiguration": {
+          "PredefinedMetricSpecification": {
+            "PredefinedMetricType": "ECSServiceAverageCPUUtilization"
+          },
+          "TargetValue": 60
+        }
+      },
+      "DependsOn": [
+        "TaskRoleDefaultPolicy07FC53DE",
+        "TaskRole30FC0FBB"
+      ],
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Service/Service/TaskCount/Target/Cpu/Resource"
+      }
+    },
+    "AdminAllowF90EBCDB": {
+      "Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
+      "Properties": {
+        "Actions": [
+          {
+            "TargetGroupArn": {
+              "Ref": "ServiceLBPublicListenerECSGroup0CC8688C"
+            },
+            "Type": "forward"
+          }
+        ],
+        "Conditions": [
+          {
+            "Field": "path-pattern",
+            "PathPatternConfig": {
+              "Values": [
+                "/admin",
+                "/admin/*"
+              ]
+            }
+          },
+          {
+            "Field": "source-ip",
+            "SourceIpConfig": {
+              "Values": {
+                "Fn::Split": [
+                  ",",
+                  {
+                    "Fn::If": [
+                      "HasAdminCidr",
+                      {
+                        "Ref": "AdminAllowedCidrs"
+                      },
+                      "127.0.0.1/32"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "ListenerArn": {
+          "Ref": "ServiceLBPublicListener46709EAA"
+        },
+        "Priority": 10,
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/AdminAllow/Resource"
+      }
+    },
+    "AdminDenyBBAEF58C": {
+      "Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
+      "Properties": {
+        "Actions": [
+          {
+            "FixedResponseConfig": {
+              "ContentType": "application/json",
+              "MessageBody": "{\"error\":\"admin UI is restricted to the AdminAllowedCidrs of this deployment\"}",
+              "StatusCode": "403"
+            },
+            "Type": "fixed-response"
+          }
+        ],
+        "Conditions": [
+          {
+            "Field": "path-pattern",
+            "PathPatternConfig": {
+              "Values": [
+                "/admin",
+                "/admin/*"
+              ]
+            }
+          }
+        ],
+        "ListenerArn": {
+          "Ref": "ServiceLBPublicListener46709EAA"
+        },
+        "Priority": 20,
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/AdminDeny/Resource"
+      }
+    },
+    "Dashboard9E4231ED": {
+      "Type": "AWS::CloudWatch::Dashboard",
+      "Properties": {
+        "DashboardBody": {
+          "Fn::Join": [
+            "",
+            [
+              "{\"widgets\":[{\"type\":\"metric\",\"width\":12,\"height\":8,\"x\":0,\"y\":0,\"properties\":{\"view\":\"timeSeries\",\"title\":\"Estimated cost per developer ($/h)\",\"region\":\"",
+              {
+                "Ref": "AWS::Region"
+              },
+              "\",\"metrics\":[[{\"expression\":\"SEARCH('{tokener,Developer} MetricName=\\\"EstimatedCostUsd\\\"', 'Sum', 3600)\",\"period\":3600}]],\"yAxis\":{}}},{\"type\":\"metric\",\"width\":12,\"height\":8,\"x\":12,\"y\":0,\"properties\":{\"view\":\"timeSeries\",\"title\":\"Tokens\",\"region\":\"",
+              {
+                "Ref": "AWS::Region"
+              },
+              "\",\"metrics\":[[\"tokener\",\"InputTokens\",{\"period\":3600,\"stat\":\"Sum\"}],[\"tokener\",\"CacheReadTokens\",{\"period\":3600,\"stat\":\"Sum\"}],[\"tokener\",\"CacheWriteTokens\",{\"period\":3600,\"stat\":\"Sum\"}],[\"tokener\",\"OutputTokens\",{\"period\":3600,\"stat\":\"Sum\"}]],\"yAxis\":{}}},{\"type\":\"metric\",\"width\":8,\"height\":6,\"x\":0,\"y\":8,\"properties\":{\"view\":\"timeSeries\",\"title\":\"Cache hit %\",\"region\":\"",
+              {
+                "Ref": "AWS::Region"
+              },
+              "\",\"metrics\":[[{\"label\":\"hit %\",\"expression\":\"100 * cr / (cr + inp + cw)\",\"period\":3600}],[\"tokener\",\"CacheReadTokens\",{\"id\":\"cr\",\"visible\":false,\"period\":3600,\"stat\":\"Sum\"}],[\"tokener\",\"InputTokens\",{\"id\":\"inp\",\"visible\":false,\"period\":3600,\"stat\":\"Sum\"}],[\"tokener\",\"CacheWriteTokens\",{\"id\":\"cw\",\"visible\":false,\"period\":3600,\"stat\":\"Sum\"}]],\"yAxis\":{\"left\":{\"min\":0,\"max\":100}}}},{\"type\":\"metric\",\"width\":8,\"height\":6,\"x\":8,\"y\":8,\"properties\":{\"view\":\"timeSeries\",\"title\":\"Latency p50 / p95 (ms)\",\"region\":\"",
+              {
+                "Ref": "AWS::Region"
+              },
+              "\",\"metrics\":[[\"tokener\",\"LatencyMs\",{\"period\":3600,\"stat\":\"p50\"}],[\"tokener\",\"LatencyMs\",{\"period\":3600,\"stat\":\"p95\"}]],\"yAxis\":{}}},{\"type\":\"metric\",\"width\":8,\"height\":6,\"x\":16,\"y\":8,\"properties\":{\"view\":\"timeSeries\",\"title\":\"Errors\",\"region\":\"",
+              {
+                "Ref": "AWS::Region"
+              },
+              "\",\"metrics\":[[\"tokener\",\"Errors\",{\"period\":3600,\"stat\":\"Sum\"}]],\"yAxis\":{}}}]}"
+            ]
+          ]
+        },
+        "DashboardName": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Ref": "AWS::StackName"
+              },
+              "-usage"
+            ]
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Dashboard/Resource"
+      }
+    },
+    "Alerts91F83244": {
+      "Type": "AWS::SNS::Topic",
+      "Properties": {
+        "DisplayName": "tokener alerts",
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Alerts/Resource"
+      }
+    },
+    "AlertsTokenSubscription1FDF3E76C": {
+      "Type": "AWS::SNS::Subscription",
+      "Properties": {
+        "Endpoint": {
+          "Ref": "AlertEmail"
+        },
+        "Protocol": "email",
+        "TopicArn": {
+          "Ref": "Alerts91F83244"
+        }
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Alerts/TokenSubscription:1/Resource"
+      },
+      "Condition": "HasAlertEmail"
+    },
+    "HighErrorRate9827C77C": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "Alerts91F83244"
+          }
+        ],
+        "AlarmDescription": "More than 20 failed model requests in 5 minutes",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 2,
+        "MetricName": "Errors",
+        "Namespace": "tokener",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "Threshold": 20,
+        "TreatMissingData": "notBreaching"
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/HighErrorRate/Resource"
+      }
+    },
+    "DailySpend800A0681": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "Alerts91F83244"
+          }
+        ],
+        "AlarmDescription": "Estimated team spend for the day crossed the alert threshold",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "EstimatedCostUsd",
+        "Namespace": "tokener",
+        "Period": 86400,
+        "Statistic": "Sum",
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "Threshold": {
+          "Ref": "TeamDailyAlertUsd"
+        },
+        "TreatMissingData": "notBreaching"
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/DailySpend/Resource"
+      }
+    },
+    "Unhealthy9594204A": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "Alerts91F83244"
+          }
+        ],
+        "AlarmDescription": "A gateway task is failing its health check",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "LoadBalancer",
+            "Value": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::Select": [
+                      1,
+                      {
+                        "Fn::Split": [
+                          "/",
+                          {
+                            "Ref": "ServiceLBPublicListener46709EAA"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "/",
+                  {
+                    "Fn::Select": [
+                      2,
+                      {
+                        "Fn::Split": [
+                          "/",
+                          {
+                            "Ref": "ServiceLBPublicListener46709EAA"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "/",
+                  {
+                    "Fn::Select": [
+                      3,
+                      {
+                        "Fn::Split": [
+                          "/",
+                          {
+                            "Ref": "ServiceLBPublicListener46709EAA"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              ]
+            }
+          },
+          {
+            "Name": "TargetGroup",
+            "Value": {
+              "Fn::GetAtt": [
+                "ServiceLBPublicListenerECSGroup0CC8688C",
+                "TargetGroupFullName"
+              ]
+            }
+          }
+        ],
+        "EvaluationPeriods": 3,
+        "MetricName": "UnHealthyHostCount",
+        "Namespace": "AWS/ApplicationELB",
+        "Period": 60,
+        "Statistic": "Average",
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching"
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/Unhealthy/Resource"
+      }
+    },
+    "MarketplaceExitFilter498FE071": {
+      "Type": "AWS::Logs::MetricFilter",
+      "Properties": {
+        "FilterPattern": "{ $.event = \"marketplace_exit\" }",
+        "LogGroupName": {
+          "Ref": "Logs6819BB44"
+        },
+        "MetricTransformations": [
+          {
+            "DefaultValue": 0,
+            "MetricName": "MarketplaceRegistrationFailures",
+            "MetricNamespace": "tokener",
+            "MetricValue": "1"
+          }
+        ]
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/MarketplaceExitFilter/Resource"
+      }
+    },
+    "MarketplaceRegistration1FC08B5F": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "Alerts91F83244"
+          }
+        ],
+        "AlarmDescription": "A gateway task exited because AWS Marketplace usage registration failed (subscription or IAM problem)",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "MarketplaceRegistrationFailures",
+        "Namespace": "tokener",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Tags": [
+          {
+            "Key": "Product",
+            "Value": "tokener"
+          },
+          {
+            "Key": "ProductVersion",
+            "Value": "0.1.0"
+          }
+        ],
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching"
+      },
+      "Metadata": {
+        "aws:cdk:path": "tokener-marketplace/MarketplaceRegistration/Resource"
+      }
+    }
+  },
+  "Outputs": {
+    "ServiceLoadBalancerDNSEC5B149E": {
+      "Value": {
+        "Fn::GetAtt": [
+          "ServiceLBE9A1ADBC",
+          "DNSName"
+        ]
+      }
+    },
+    "ServiceServiceURL250C0FB6": {
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            "https://",
+            {
+              "Fn::GetAtt": [
+                "ServiceLBE9A1ADBC",
+                "DNSName"
+              ]
+            }
+          ]
+        ]
+      }
+    },
+    "GatewayUrl": {
+      "Description": "ANTHROPIC_BASE_URL for developers",
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            "https://",
+            {
+              "Fn::If": [
+                "HasDomainName",
+                {
+                  "Ref": "DomainName"
+                },
+                {
+                  "Fn::GetAtt": [
+                    "ServiceLBE9A1ADBC",
+                    "DNSName"
+                  ]
+                }
+              ]
+            }
+          ]
+        ]
+      }
+    },
+    "LoadBalancerDns": {
+      "Description": "Point your DNS CNAME here",
+      "Value": {
+        "Fn::GetAtt": [
+          "ServiceLBE9A1ADBC",
+          "DNSName"
+        ]
+      }
+    },
+    "AdminUrl": {
+      "Description": "Admin UI (reachable from AdminAllowedCidrs only)",
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            "https://",
+            {
+              "Fn::If": [
+                "HasDomainName",
+                {
+                  "Ref": "DomainName"
+                },
+                {
+                  "Fn::GetAtt": [
+                    "ServiceLBE9A1ADBC",
+                    "DNSName"
+                  ]
+                }
+              ]
+            },
+            "/admin/"
+          ]
+        ]
+      }
+    },
+    "AdminTokenSecretArn": {
+      "Description": "Secrets Manager secret holding the admin token",
+      "Value": {
+        "Ref": "AdminToken38B307E8"
+      }
+    },
+    "AdminTokenCommand": {
+      "Description": "Retrieve the admin token",
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            "aws secretsmanager get-secret-value --secret-id ",
+            {
+              "Ref": "AdminToken38B307E8"
+            },
+            " --query SecretString --output text"
+          ]
+        ]
+      }
+    },
+    "KeysTableName": {
+      "Value": {
+        "Ref": "Keys4E30B592"
+      }
+    },
+    "UsageTableName": {
+      "Value": {
+        "Ref": "Usage04F2BA28"
+      }
+    },
+    "DashboardName": {
+      "Value": {
+        "Ref": "Dashboard9E4231ED"
+      }
+    },
+    "LogGroupName": {
+      "Value": {
+        "Ref": "Logs6819BB44"
+      }
+    },
+    "TaskRoleArn": {
+      "Description": "Role that calls Bedrock",
+      "Value": {
+        "Fn::If": [
+          "HasExistingTaskRole",
+          {
+            "Ref": "ExistingTaskRoleArn"
+          },
+          {
+            "Fn::GetAtt": [
+              "TaskRole30FC0FBB",
+              "Arn"
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tokener · Admin</title>
+<link rel="stylesheet" href="/admin/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M9 11h14M16 11v11' stroke='%23fff' stroke-width='3.2' stroke-linecap='round'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<section id="login" class="login hidden">
+  <form id="loginForm" class="login-card">
+    <div class="brand big"><span class="logo">t</span><div><b>tokener</b><small>Claude Code → Amazon Bedrock gateway</small></div></div>
+    <h1>Sign in to the admin console</h1>
+    <p class="muted">Use the admin token from Secrets Manager (<code>AdminTokenCommand</code> stack output) or the <code>ADMIN_TOKEN</code> you started the gateway with.</p>
+    <label>Admin token <input id="tokenInput" type="password" placeholder="••••••••••••" autocomplete="current-password" required></label>
+    <button type="submit">Sign in</button>
+    <p id="loginErr" class="err"></p>
+    <p class="muted small">The token is kept in this browser only. Developers never use it; they get personal tokens from the Developers page.</p>
+  </form>
+</section>
+
+<div id="shell" class="shell hidden">
+  <aside class="sidebar">
+    <div class="brand"><span class="logo">t</span><span class="brand-name">tokener</span><button id="sidebarToggle" class="icon ghost" title="Collapse sidebar">‹</button></div>
+    <nav id="nav"></nav>
+    <div class="sidebar-foot">
+      <span id="versionBadge" class="muted small"></span>
+      <a class="muted small" href="https://github.com/uurtech/tokener/blob/master/docs/MARKETPLACE.md" target="_blank" rel="noopener">Docs ↗</a>
+    </div>
+  </aside>
+
+  <div class="content">
+    <header class="topbar">
+      <div class="crumbs" id="envBadge"></div>
+      <div class="topbar-actions">
+        <span class="kbd-hint muted small">1–7 switch pages · r refresh</span>
+        <button id="refreshBtn" class="icon ghost" title="Refresh">↻</button>
+        <button id="themeBtn" class="icon ghost" title="Theme">◐</button>
+        <button id="logout" class="ghost">Sign out</button>
+      </div>
+    </header>
+    <main id="main" class="main"></main>
+  </div>
+</div>
+
+<div id="drawerBackdrop" class="backdrop hidden"></div>
+<aside id="drawer" class="drawer hidden" aria-hidden="true"></aside>
+<div id="modalRoot" class="hidden"></div>
+<div id="tip" class="tip hidden"></div>
+<div id="toast" class="toast hidden"></div>
+<script type="module" src="/admin/app.js"></script>
+</body>
+</html>

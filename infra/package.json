@@ -1,0 +1,25 @@
+{
+  "name": "claude-bedrock-gateway-infra",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy",
+    "destroy": "cdk destroy",
+    "synth:marketplace": "mkdir -p dist && cdk synth -c marketplace=1 --json tokener-marketplace 2>dist/synth.log > dist/tokener-marketplace.template.json && node scripts/check-template.mjs dist/tokener-marketplace.template.json",
+    "lint:marketplace": "if [ -x .venv/bin/cfn-lint ]; then .venv/bin/cfn-lint --non-zero-exit-code error dist/tokener-marketplace.template.json; else echo 'cfn-lint not installed: python3 -m venv .venv && .venv/bin/pip install cfn-lint'; fi",
+    "release:template": "npm run synth:marketplace && npm run lint:marketplace"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.272.0",
+    "constructs": "^10.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "aws-cdk": "^2.1106.0",
+    "tsx": "^4.23.0",
+    "typescript": "^5.9.0"
+  }
+}

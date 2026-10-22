@@ -1,0 +1,25 @@
+{
+  "_comment": "Gateway runtime policy defaults. Every `env` key becomes a container environment variable. `adminToken` enables the /admin UI (keep it secret; empty disables the UI). Policy can later be changed live from the UI; the UI's saved policy overrides these defaults.",
+  "stackName": "ClaudeBedrockGateway",
+  "desiredCount": 2,
+  "cpu": 512,
+  "memoryMiB": 1024,
+  "domainName": "",
+  "certificateArn": "",
+  "alertEmail": "",
+  "env": {
+    "METRICS_NAMESPACE": "ClaudeGateway",
+    "BRIDGE_BEDROCK": "true",
+    "EFFORT_MODE": "off",
+    "DEFAULT_EFFORT": "high",
+    "ROUTE_SUBAGENT_MODEL": "",
+    "ROUTE_AUXILIARY_MODEL": "",
+    "ROUTE_COMPACTION_MODEL": "",
+    "OPERATOR_PROMPT": "",
+    "CACHE_TTL_1H": "false",
+    "TOOL_RESULT_MAX_CHARS": "0",
+    "BUDGET_ACTION": "warn",
+    "DOWNGRADE_MODEL": "anthropic.claude-sonnet-5-5"
+  },
+  "adminToken": ""
+}
