@@ -4,7 +4,6 @@
 
 <br>
 
-[![CI](https://github.com/uurtech/tokener/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/uurtech/tokener/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2b7de9.svg)](LICENSE)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.13-339933?logo=nodedotjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)
@@ -377,7 +376,6 @@ tool_result trimming, error passthrough and EMF metric output.
 ## 🤝 Contributing
 
 Issues and PRs are welcome. Before opening a PR, run `npm run typecheck && npm test && npm run smoke` in `gateway/`.
-CI runs the same steps and also builds a `linux/amd64` image.
 
 ## 📄 License
 
