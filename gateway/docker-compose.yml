@@ -3,11 +3,11 @@
 services:
   gateway:
     build: .
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]   # localhost only
     environment:
       STORE: sqlite
       SQLITE_PATH: /app/data/gateway.db
-      ADMIN_TOKEN: ${ADMIN_TOKEN:-change-me}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN to a long random value}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       AWS_PROFILE: ${AWS_PROFILE:-default}
       EFFORT_MODE: ${EFFORT_MODE:-off}
