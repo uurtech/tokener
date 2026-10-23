@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How it works · tokener</title>
+<meta name="description" content="tokener is a drop-in API gateway that measures and cuts the token cost of Claude Code on Amazon Bedrock.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪙</text></svg>">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <nav class="container nav" aria-label="Main">
+    <a class="brand" href="index.html"><span class="brand-mark">t</span>tokener</a>
+    <button class="nav-toggle" aria-label="Toggle menu" aria-expanded="false">☰</button>
+    <ul class="nav-links"><li><a href="features.html">Features</a></li><li><a href="how-it-works.html" aria-current="page">How it works</a></li><li><a href="console.html">Console</a></li><li><a href="docs.html">Docs</a></li><li><a href="about.html">About</a></li><li><a href="https://github.com/uurtech/tokener">GitHub ↗</a></li></ul>
+  </nav>
+</header>
+<main>
+<section class="hero small">
+  <div class="container">
+    <p class="eyebrow">How it works</p>
+    <h1>A thin gateway between <span class="grad">Claude Code and Bedrock.</span></h1>
+    <p class="lead">tokener implements Claude Code's official gateway protocol and runs inside your own AWS account.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>The request pipeline</h2>
+    <p class="section-lead">Every request passes through five stages. Responses stream straight back to Claude Code as SSE.</p>
+    <div class="flow">
+      <div class="step"><b>Claude Code</b><span>ANTHROPIC_BASE_URL</span></div>
+      <div class="arrow">→</div>
+      <div class="step"><b>auth</b><span>hashed personal token</span></div>
+      <div class="arrow">→</div>
+      <div class="step"><b>policy</b><span>routing, effort, trimming</span></div>
+      <div class="arrow">→</div>
+      <div class="step"><b>budget</b><span>USD and token limits</span></div>
+      <div class="arrow">→</div>
+      <div class="step"><b>SigV4 / API key</b><span>signs upstream call</span></div>
+      <div class="arrow">→</div>
+      <div class="step"><b>metering</b><span>usage, cost, EMF</span></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>On AWS</h2>
+    <p class="section-lead">An Application Load Balancer in front of ECS Fargate. Keys, usage and policy live in DynamoDB. Metrics go to CloudWatch, alerts to SNS.</p>
+    <div class="grid grid-3">
+      <div class="card"><h3>Compute</h3><p>ECS Fargate behind an ALB. Two tasks are plenty for 10 developers, with auto-scaling up to 6 at 60% CPU.</p></div>
+      <div class="card"><h3>State</h3><p>DynamoDB for keys, usage and policy. Policy changes reach every task within 30 seconds.</p></div>
+      <div class="card"><h3>Observability</h3><p>CloudWatch EMF metrics, a dashboard and alarms, with SNS e-mail alerts for team-wide spend.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>Two run modes, same code</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th></th><th>Local</th><th>AWS</th></tr></thead>
+        <tbody>
+          <tr><td>Storage</td><td>SQLite</td><td>DynamoDB</td></tr>
+          <tr><td>Credentials</td><td>Your own AWS credentials or a Bedrock API key</td><td>ECS task role</td></tr>
+          <tr><td>Start</td><td><code>npm run local</code></td><td><code>npx cdk deploy</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>Two Bedrock APIs, switchable live</h2>
+    <div class="grid grid-2">
+      <div class="card"><h3>Mantle</h3><p>The Anthropic Messages API endpoint on Bedrock. Requests are forwarded byte for byte.</p></div>
+      <div class="card"><h3>Runtime</h3><p>Classic <code>InvokeModel</code>. The gateway translates the body, converts the AWS event stream into SSE, and calls the model through its inference profile id.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>Security</h2>
+    <div class="grid grid-2">
+      <div class="card"><p>The ECS task role is the only identity that can call Bedrock. Developers hold no AWS credentials.</p></div>
+      <div class="card"><p>Tokens are stored as SHA-256 hashes. Logs contain counts, the model and the session id, never prompt content.</p></div>
+      <div class="card"><p>Conversation content is never persisted. It is transformed in memory and forwarded.</p></div>
+      <div class="card"><p>A per-key <code>allowedModels</code> list restricts which models each developer can use.</p></div>
+    </div>
+  </div>
+</section>
+</main>
+<footer class="site-footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div>
+        <a class="brand" href="index.html"><span class="brand-mark">t</span>tokener</a>
+        <p>An open-source gateway that measures and cuts the token cost of Claude Code on Amazon Bedrock.</p>
+        <span class="based-in">🇦🇪 Based in Dubai, United Arab Emirates</span>
+      </div>
+      <div><h4>Product</h4><ul>
+        <li><a href="features.html">Features</a></li>
+        <li><a href="how-it-works.html">How it works</a></li>
+        <li><a href="console.html">Admin console</a></li>
+      </ul></div>
+      <div><h4>Resources</h4><ul>
+        <li><a href="docs.html">Docs</a></li>
+        <li><a href="https://github.com/uurtech/tokener">GitHub</a></li>
+        <li><a href="https://github.com/uurtech/tokener/blob/master/CHANGELOG.md">Changelog</a></li>
+      </ul></div>
+      <div><h4>Company</h4><ul>
+        <li><a href="about.html">About</a></li>
+        <li><a href="https://github.com/uurtech/tokener/issues">Issues</a></li>
+        <li><a href="https://github.com/uurtech/tokener/blob/master/LICENSE">MIT License</a></li>
+      </ul></div>
+    </div>
+    <div class="footer-bottom">
+      <span>© <span data-year>2026</span> uurtech · Made with care in Dubai 🌴</span>
+      <span>Not affiliated with Anthropic or Amazon Web Services.</span>
+    </div>
+  </div>
+</footer>
+<script src="assets/main.js"></script>
+</body>
+</html>

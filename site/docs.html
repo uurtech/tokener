@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs · tokener</title>
+<meta name="description" content="tokener is a drop-in API gateway that measures and cuts the token cost of Claude Code on Amazon Bedrock.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪙</text></svg>">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <nav class="container nav" aria-label="Main">
+    <a class="brand" href="index.html"><span class="brand-mark">t</span>tokener</a>
+    <button class="nav-toggle" aria-label="Toggle menu" aria-expanded="false">☰</button>
+    <ul class="nav-links"><li><a href="features.html">Features</a></li><li><a href="how-it-works.html">How it works</a></li><li><a href="console.html">Console</a></li><li><a href="docs.html" aria-current="page">Docs</a></li><li><a href="about.html">About</a></li><li><a href="https://github.com/uurtech/tokener">GitHub ↗</a></li></ul>
+  </nav>
+</header>
+<main>
+<section class="hero small">
+  <div class="container">
+    <p class="eyebrow">Docs</p>
+    <h1>Up and running <span class="grad">in five minutes.</span></h1>
+    <p class="lead">Start locally with your own credentials, then deploy to AWS when you're ready.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container docs-layout">
+    <nav class="docs-nav" aria-label="Docs">
+      <a href="#quick-start">Quick start</a>
+      <a href="#developer-setup">Developer setup</a>
+      <a href="#deploy">Deploy to AWS</a>
+      <a href="#configuration">Configuration</a>
+      <a href="#testing">Testing</a>
+      <a href="#limitations">Limitations</a>
+    </nav>
+    <div class="docs-body">
+      <h2 id="quick-start">Quick start (local)</h2>
+      <p>Nothing is deployed to AWS. You need Node 22.13+ and AWS credentials with access to the Anthropic models on Bedrock.</p>
+      <pre><code>git clone https://github.com/uurtech/tokener.git &amp;&amp; cd tokener/gateway
+npm ci &amp;&amp; npm run build
+cp .env.example .env   <span class="c-comment"># AWS_BEARER_TOKEN_BEDROCK (or IAM keys), AWS_REGION, ADMIN_TOKEN</span>
+npm run local</code></pre>
+      <p>The output prints a one-click login link to the admin console. If <code>ADMIN_TOKEN</code> is empty, a random one is generated and printed. Or run it with Docker:</p>
+      <pre><code>cd gateway &amp;&amp; ADMIN_TOKEN=secret AWS_PROFILE=myprofile docker compose up --build</code></pre>
+
+      <h2 id="developer-setup">Developer setup</h2>
+      <p>Create a developer in the console. Each developer adds this block to <code>~/.claude/settings.json</code>:</p>
+      <pre><code>{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://claude-gw.archeon.dev",
+    "ANTHROPIC_AUTH_TOKEN": "cgw_...",
+    "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5"
+  }
+}</code></pre>
+      <p><code>CLAUDE_CODE_GATEWAY_HINT_HEADERS</code> matters most: without it, every request counts as the main conversation and routing has nothing to work with.</p>
+
+      <h2 id="deploy">Deploy to AWS</h2>
+      <p>Requires AWS CLI v2, Node.js 22+, Docker and AWS CDK v2. A domain and ACM certificate are optional; without them the ALB serves HTTP, which is fine for a POC only.</p>
+      <pre><code>cd gateway &amp;&amp; npm ci &amp;&amp; npm test
+cd ../infra &amp;&amp; npm ci
+npx cdk bootstrap   <span class="c-comment"># first time per account/region</span>
+npx cdk deploy      <span class="c-comment"># ~8 min</span></code></pre>
+      <pre><code>./scripts/create-dev-key.sh &lt;KeysTableName&gt; alice 25 backend 5000000
+<span class="c-comment">#                          name  USD/day team tokens/day</span></code></pre>
+
+      <h2 id="configuration">Configuration</h2>
+      <p>The <code>env</code> block in <code>infra/gateway.config.json</code> sets the initial behavior. Policy saved from the console overrides it.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>BRIDGE_BEDROCK</code></td><td><code>true</code></td><td>Strips fields Bedrock rejects. Keep it on.</td></tr>
+          <tr><td><code>ROUTE_SUBAGENT_MODEL</code></td><td>empty</td><td>Model for subagent requests.</td></tr>
+          <tr><td><code>ROUTE_AUXILIARY_MODEL</code></td><td>empty</td><td>Model for titles and summaries.</td></tr>
+          <tr><td><code>EFFORT_MODE</code></td><td><code>off</code></td><td><code>fill</code> or <code>override</code>.</td></tr>
+          <tr><td><code>TOOL_RESULT_MAX_CHARS</code></td><td><code>0</code></td><td><code>20000</code> is recommended.</td></tr>
+          <tr><td><code>BUDGET_ACTION</code></td><td><code>warn</code></td><td><code>warn</code>, <code>downgrade</code> or <code>block</code>.</td></tr>
+          <tr><td><code>UPSTREAM_MODE</code></td><td><code>mantle</code></td><td><code>mantle</code> or <code>runtime</code>. Switchable live.</td></tr>
+        </tbody>
+      </table></div>
+      <p style="margin-top:16px">The full list is in the <a href="https://github.com/uurtech/tokener#%EF%B8%8F-configuration">README</a>.</p>
+
+      <h2 id="testing">Testing</h2>
+      <pre><code>cd gateway
+npm test         <span class="c-comment"># unit tests (vitest)</span>
+npm run smoke    <span class="c-comment"># end-to-end against a fake Bedrock upstream</span></code></pre>
+
+      <h2 id="limitations">Limitations</h2>
+      <p>Bridging needs ongoing maintenance as Claude Code adds beta fields. Prices are estimates; Cost Explorer is the source of truth. Budgets reset daily at UTC midnight. Structured outputs and server-side tools are not available on Bedrock.</p>
+    </div>
+  </div>
+</section>
+</main>
+<footer class="site-footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div>
+        <a class="brand" href="index.html"><span class="brand-mark">t</span>tokener</a>
+        <p>An open-source gateway that measures and cuts the token cost of Claude Code on Amazon Bedrock.</p>
+        <span class="based-in">🇦🇪 Based in Dubai, United Arab Emirates</span>
+      </div>
+      <div><h4>Product</h4><ul>
+        <li><a href="features.html">Features</a></li>
+        <li><a href="how-it-works.html">How it works</a></li>
+        <li><a href="console.html">Admin console</a></li>
+      </ul></div>
+      <div><h4>Resources</h4><ul>
+        <li><a href="docs.html">Docs</a></li>
+        <li><a href="https://github.com/uurtech/tokener">GitHub</a></li>
+        <li><a href="https://github.com/uurtech/tokener/blob/master/CHANGELOG.md">Changelog</a></li>
+      </ul></div>
+      <div><h4>Company</h4><ul>
+        <li><a href="about.html">About</a></li>
+        <li><a href="https://github.com/uurtech/tokener/issues">Issues</a></li>
+        <li><a href="https://github.com/uurtech/tokener/blob/master/LICENSE">MIT License</a></li>
+      </ul></div>
+    </div>
+    <div class="footer-bottom">
+      <span>© <span data-year>2026</span> uurtech · Made with care in Dubai 🌴</span>
+      <span>Not affiliated with Anthropic or Amazon Web Services.</span>
+    </div>
+  </div>
+</footer>
+<script src="assets/main.js"></script>
+</body>
+</html>
