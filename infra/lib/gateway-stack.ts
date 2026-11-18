@@ -7,6 +7,7 @@ import * as ecsPatterns from "aws-cdk-lib/aws-ecs-patterns";
 import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as kms from "aws-cdk-lib/aws-kms";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as cw from "aws-cdk-lib/aws-cloudwatch";
 import * as cwActions from "aws-cdk-lib/aws-cloudwatch-actions";
@@ -80,6 +81,9 @@ export class GatewayStack extends Stack {
     };
     for (const [k, v] of Object.entries(c.env ?? {})) if (v !== "") env[k] = v;
     if (c.adminToken) env.ADMIN_TOKEN = c.adminToken;
+    // Upstream pool keys (Anthropic / Bedrock API keys added in the console) are sealed under a KMS data key.
+    const poolKey = new kms.Key(this, "KeyPoolKey", { enableKeyRotation: true, description: "tokener: encrypts upstream API keys stored by the gateway", removalPolicy: RemovalPolicy.RETAIN });
+    env.KEY_POOL_KMS_KEY_ID = poolKey.keyArn;
 
     const svc = new ecsPatterns.ApplicationLoadBalancedFargateService(this, "Service", {
       cluster,
@@ -114,6 +118,8 @@ export class GatewayStack extends Stack {
 
     const scaling = svc.service.autoScaleTaskCount({ minCapacity: c.desiredCount ?? 2, maxCapacity: 6 });
     scaling.scaleOnCpuUtilization("Cpu", { targetUtilizationPercent: 60 });
+
+    poolKey.grant(svc.taskDefinition.taskRole, "kms:Decrypt", "kms:GenerateDataKey");
 
     // --- IAM: the task role is the only principal that can call Bedrock.
     svc.taskDefinition.taskRole.addToPrincipalPolicy(

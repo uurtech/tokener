@@ -127,10 +127,16 @@ Task role statements:
 | AnthropicModelSubscriptionViaBedrock | `aws-marketplace:ViewSubscriptions`, `aws-marketplace:Subscribe` | `*`, condition `aws:CalledViaLast = bedrock.amazonaws.com` |
 | (managed) AWSMarketplaceMeteringRegisterUsage | RegisterUsage for this product | — |
 | DynamoDB grants | read/write | the two stack tables |
+| KMS grant | `kms:Decrypt`, `kms:GenerateDataKey` | the stack's `KeyPoolKey` (encrypts upstream API keys added in the console; rotation on) |
 
 **Bring your own role.** Set `ExistingTaskRoleArn` to a role trusted by `ecs-tasks.amazonaws.com`
 with the statements above; the tasks run with your role and the stack's own least-privilege role stays unused. The two table names are stack
-outputs; grant them after the first deployment or use a wildcard on the stack prefix.
+outputs; grant them after the first deployment or use a wildcard on the stack prefix. Also allow
+`kms:Decrypt` and `kms:GenerateDataKey` on the stack's `KeyPoolKey`; without it, upstream keys added in the console
+cannot be decrypted (the Keys page shows them as `error`).
+
+**Calls outside AWS.** Only if the buyer adds Anthropic API keys to the key pool: the tasks then call
+`api.anthropic.com` over HTTPS through the NAT gateways. With Bedrock only, all traffic stays on AWS endpoints.
 
 **Permissions boundary.** `PermissionsBoundaryArn` is attached to every role the stack creates.
 

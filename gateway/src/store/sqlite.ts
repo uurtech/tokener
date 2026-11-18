@@ -6,7 +6,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Policy } from "../policy-state.js";
-import type { PoolDoc } from "../keypool.js";
+import type { PoolDoc, SharedKeyState } from "../keypool.js";
 import { hitPct, lastDays, ZERO_TOTALS, type AuditStore, type BreakdownRow, type DailyTotals, type DeveloperRecord, type KeyStore, type Overview, type PolicyStore, type PoolStore, type RequestRecord, type Store, type UsageStore } from "./types.js";
 
 const SCHEMA = `
@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS developers (
   team TEXT,
   daily_budget_usd REAL,
   daily_token_limit REAL,
+  monthly_budget_usd REAL,
+  monthly_token_limit REAL,
   enabled INTEGER NOT NULL DEFAULT 1,
   allowed_models TEXT,
   upstream_mode TEXT,
@@ -53,6 +55,7 @@ CREATE INDEX IF NOT EXISTS requests_ts ON requests(ts);
 CREATE INDEX IF NOT EXISTS requests_session ON requests(session_id);
 CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, action TEXT NOT NULL, target TEXT, details TEXT);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS key_state (id TEXT PRIMARY KEY, value TEXT NOT NULL);
 `;
 
 type Row = Record<string, unknown>;
@@ -65,6 +68,8 @@ function toDev(r: Row): DeveloperRecord {
     team: (r.team as string | null) ?? undefined,
     dailyBudgetUsd: r.daily_budget_usd === null ? undefined : Number(r.daily_budget_usd),
     dailyTokenLimit: r.daily_token_limit === null || r.daily_token_limit === undefined ? undefined : Number(r.daily_token_limit),
+    monthlyBudgetUsd: r.monthly_budget_usd === null || r.monthly_budget_usd === undefined ? undefined : Number(r.monthly_budget_usd),
+    monthlyTokenLimit: r.monthly_token_limit === null || r.monthly_token_limit === undefined ? undefined : Number(r.monthly_token_limit),
     allowedModels: r.allowed_models ? (JSON.parse(r.allowed_models as string) as string[]) : undefined,
     upstreamMode: r.upstream_mode === "mantle" || r.upstream_mode === "runtime" ? r.upstream_mode : undefined,
     createdAt: (r.created_at as string | null) ?? undefined,
@@ -135,6 +140,8 @@ export class SqliteStore implements Store {
     const cols = new Set((db.prepare("PRAGMA table_info(developers)").all() as Row[]).map((r) => String(r.name)));
     if (!cols.has("daily_token_limit")) db.exec("ALTER TABLE developers ADD COLUMN daily_token_limit REAL");
     if (!cols.has("upstream_mode")) db.exec("ALTER TABLE developers ADD COLUMN upstream_mode TEXT");
+    if (!cols.has("monthly_budget_usd")) db.exec("ALTER TABLE developers ADD COLUMN monthly_budget_usd REAL");
+    if (!cols.has("monthly_token_limit")) db.exec("ALTER TABLE developers ADD COLUMN monthly_token_limit REAL");
     const rcols = new Set((db.prepare("PRAGMA table_info(requests)").all() as Row[]).map((r) => String(r.name)));
     if (!rcols.has("saved_usd")) db.exec("ALTER TABLE requests ADD COLUMN saved_usd REAL NOT NULL DEFAULT 0");
     if (!rcols.has("provider_key")) db.exec("ALTER TABLE requests ADD COLUMN provider_key TEXT");
@@ -151,8 +158,8 @@ export class SqliteStore implements Store {
       },
       async create(rec) {
         db.prepare(
-          "INSERT INTO developers (key_hash, developer_id, team, daily_budget_usd, daily_token_limit, enabled, allowed_models, upstream_mode, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        ).run(rec.keyHash, rec.developerId, rec.team ?? null, rec.dailyBudgetUsd ?? null, rec.dailyTokenLimit ?? null, rec.enabled ? 1 : 0, rec.allowedModels?.length ? JSON.stringify(rec.allowedModels) : null, rec.upstreamMode ?? null, rec.createdAt ?? new Date().toISOString());
+          "INSERT INTO developers (key_hash, developer_id, team, daily_budget_usd, daily_token_limit, monthly_budget_usd, monthly_token_limit, enabled, allowed_models, upstream_mode, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ).run(rec.keyHash, rec.developerId, rec.team ?? null, rec.dailyBudgetUsd ?? null, rec.dailyTokenLimit ?? null, rec.monthlyBudgetUsd ?? null, rec.monthlyTokenLimit ?? null, rec.enabled ? 1 : 0, rec.allowedModels?.length ? JSON.stringify(rec.allowedModels) : null, rec.upstreamMode ?? null, rec.createdAt ?? new Date().toISOString());
       },
       async setEnabled(developerId, enabled) {
         const r = db.prepare("UPDATE developers SET enabled = ?, revoked_at = ? WHERE developer_id = ?").run(enabled ? 1 : 0, enabled ? null : new Date().toISOString(), developerId);
@@ -172,6 +179,14 @@ export class SqliteStore implements Store {
         if (patch.dailyTokenLimit !== undefined) {
           sets.push("daily_token_limit = ?");
           vals.push(patch.dailyTokenLimit);
+        }
+        if (patch.monthlyBudgetUsd !== undefined) {
+          sets.push("monthly_budget_usd = ?");
+          vals.push(patch.monthlyBudgetUsd);
+        }
+        if (patch.monthlyTokenLimit !== undefined) {
+          sets.push("monthly_token_limit = ?");
+          vals.push(patch.monthlyTokenLimit);
         }
         if (patch.team !== undefined) {
           sets.push("team = ?");
@@ -250,6 +265,19 @@ export class SqliteStore implements Store {
         const rows = db.prepare(`SELECT * FROM requests ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`).all(...(vals as never[])) as Row[];
         return rows.map(toReq);
       },
+      async monthTotals(developerId) {
+        const month = new Date().toISOString().slice(0, 7);
+        return totals(db.prepare(`SELECT ${TOTALS_SQL} FROM requests WHERE day >= ? AND day < ? AND developer_id = ?`).get(`${month}-01`, `${month}-99`, developerId) as Row);
+      },
+      async developerTrend(developerId, days) {
+        const keys = lastDays(days);
+        const rows = db.prepare(`SELECT day, ${TOTALS_SQL} FROM requests WHERE day >= ? AND developer_id = ? GROUP BY day`).all(keys[0], developerId) as Row[];
+        const byDay = new Map(rows.map((r) => [String(r.day), r]));
+        return keys.map((day) => {
+          const r = byDay.get(day);
+          return r ? { day, ...totals(r), developers: 1 } : { day, ...ZERO_TOTALS(), developers: 0 };
+        });
+      },
       async keyTotals(providerKey) {
         const day = new Date().toISOString().slice(0, 10);
         return totals(db.prepare(`SELECT ${TOTALS_SQL} FROM requests WHERE day = ? AND provider_key = ?`).get(day, providerKey) as Row);
@@ -296,6 +324,14 @@ export class SqliteStore implements Store {
       },
       async save(doc) {
         db.prepare("INSERT INTO settings (key, value, updated_at) VALUES ('keypool', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(JSON.stringify(doc), new Date().toISOString());
+      },
+      async saveState(id, st) {
+        db.prepare("INSERT INTO key_state (id, value) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET value = excluded.value").run(id, JSON.stringify(st));
+      },
+      async loadStates() {
+        const out: Record<string, SharedKeyState> = {};
+        for (const r of db.prepare("SELECT id, value FROM key_state").all() as Row[]) out[String(r.id)] = JSON.parse(String(r.value)) as SharedKeyState;
+        return out;
       },
     };
   }

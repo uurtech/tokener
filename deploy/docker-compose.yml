@@ -1,0 +1,38 @@
+# Production single-server deployment: tokener + Caddy (automatic HTTPS via Let's Encrypt).
+#   cp .env.example .env   # set DOMAIN, ADMIN_TOKEN, KEY_POOL_SECRET
+#   docker compose up -d
+# Or run install.sh on a fresh VM, which does all of the above.
+services:
+  tokener:
+    image: ${TOKENER_IMAGE:-ghcr.io/uurtech/tokener:latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      STORE: sqlite
+      SQLITE_PATH: /app/data/gateway.db
+      PORT: "8080"
+    volumes:
+      - tokener-data:/app/data
+    expose: ["8080"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on: [tokener]
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env (e.g. claude-gw.example.com, or :80 for plain HTTP)}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  tokener-data:
+  caddy-data:
+  caddy-config:

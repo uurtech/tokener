@@ -13,11 +13,16 @@ import { transformRequest, isConversationStart, resolveModel, type Json, type Re
 import { SseUsageTap, summaryFromMessage, type StreamSummary } from "./sse.js";
 import { createStore, hitPct, type RequestRecord } from "./store/index.js";
 import { effectiveConfig, policyFromConfig, type Policy } from "./policy-state.js";
-import { handleAdmin } from "./admin.js";
-import { budgetHeaders, budgetMessage, evaluateBudget, hasLimits, type BudgetState } from "./budget.js";
+import { handleAdmin, serveMePage } from "./admin.js";
+import { budgetHeaders, budgetMessage, evaluateBudget, hasLimits, hasMonthlyLimits, type BudgetState } from "./budget.js";
 import { ModelCatalog, modelsForClients, sdkLister } from "./models.js";
 import { BedrockRuntimeUpstream, sdkRuntimeClient, toRuntimeModelId } from "./upstream-runtime.js";
 import { KeyPool, SecretBox, classifyFailure, toAnthropicModelId, ENV_KEY_ID, type Selected } from "./keypool.js";
+import { Alerter } from "./alerts.js";
+import { Oidc, oidcConfigFromEnv } from "./oidc.js";
+import { resolveDataKey, sdkKms } from "./kms.js";
+import { createHash } from "node:crypto";
+import { hostname } from "node:os";
 import type { UpstreamMode } from "./config.js";
 import { marketplaceSettingsFromEnv, registerWithMarketplace, sdkMeteringClient, type MarketplaceStatus } from "./marketplace.js";
 
@@ -36,11 +41,44 @@ const catalog = new ModelCatalog(baseCfg.modelCatalogEnabled ? sdkLister(baseCfg
 const adminToken = process.env.ADMIN_TOKEN ?? "";
 const ANTHROPIC_API_URL = process.env.ANTHROPIC_API_URL || "https://api.anthropic.com";
 // Upstream key pool. Secrets are sealed with KEY_POOL_SECRET (falls back to ADMIN_TOKEN).
+const secretBox = new SecretBox(process.env.KEY_POOL_SECRET || adminToken || undefined);
 const keyPool = new KeyPool(
-  new SecretBox(process.env.KEY_POOL_SECRET || adminToken || undefined),
+  secretBox,
   { label: process.env.AWS_BEARER_TOKEN_BEDROCK ? "Bedrock API key (AWS_BEARER_TOKEN_BEDROCK)" : "AWS credentials (task role / IAM)" },
+  Date.now,
+  // Several Fargate tasks behind an ALB see the same sessions: assign sessions to keys deterministically.
+  { distributed: store.kind === "dynamo" },
 );
 keyPool.loadEnvKeys(process.env.PROVIDER_KEYS_JSON);
+
+// Alerts: key failures a human must fix, pool exhaustion, developers hitting limits.
+const alerter = new Alerter(() => policy.alertWebhookUrl || "", process.env.ALERT_SOURCE || hostname(), (o) => log(o));
+keyPool.onEvent = (e) => {
+  if (e.type === "key.down") {
+    const human = e.reason === "auth_failed" || e.reason === "forbidden" || e.reason === "credit_exhausted";
+    alerter.emit(
+      {
+        kind: "key.down",
+        severity: human ? "critical" : "warning",
+        title: `Key "${e.label}" (${e.kind}) is out of rotation: ${e.reason.replace(/_/g, " ")}`,
+        detail: human ? "This needs a person: check the key, its credit balance or model access." : `It failed ${e.failures} times in a row and will be retried after the cooldown.`,
+        fields: { key: e.id, status: e.status, cooldown: `${Math.round(e.cooldownMs / 1000)}s`, error: e.error },
+      },
+      `key.down:${e.id}:${e.reason}`,
+    );
+  } else {
+    alerter.emit({ kind: "key.recovered", severity: "info", title: `Key "${e.label}" (${e.kind}) is healthy again`, fields: { key: e.id, was: e.downReason } }, `key.recovered:${e.id}`, 60_000);
+  }
+};
+keyPool.onState = (id, st) => {
+  store.pool.saveState(id, st).catch((err: unknown) => log({ event: "keystate_save_failed", key: id, error: String(err) }));
+};
+
+// Admin single sign-on (optional). Sessions are signed with SESSION_SECRET, else a value derived from the other secrets.
+const oidcCfg = oidcConfigFromEnv();
+const oidc = oidcCfg
+  ? new Oidc(oidcCfg, createHash("sha256").update(`tokener-session:${process.env.SESSION_SECRET || process.env.KEY_POOL_SECRET || adminToken || oidcCfg.clientSecret || oidcCfg.clientId}`).digest())
+  : null;
 const emfEnabled = (process.env.EMF_ENABLED ?? (store.kind === "dynamo" ? "1" : "0")) === "1";
 const startedAt = Date.now();
 const VERSION = (() => {
@@ -81,6 +119,28 @@ async function reloadPool(): Promise<void> {
     log({ event: "keypool_load_failed", error: String(e) });
   }
 }
+/** Cooldowns written by other tasks (or by this process before a restart). */
+async function syncKeyStates(): Promise<void> {
+  try {
+    keyPool.applyShared(await store.pool.loadStates());
+  } catch (e) {
+    log({ event: "keystate_load_failed", error: String(e) });
+  }
+}
+/** KEY_POOL_KMS_KEY_ID: unwrap (or create) the KMS data key and move any secret-sealed keys under it. */
+async function initKms(): Promise<void> {
+  const keyId = process.env.KEY_POOL_KMS_KEY_ID;
+  if (!keyId) return;
+  try {
+    const r = await resolveDataKey(sdkKms(baseCfg.awsRegion), keyId, keyPool.dataKey);
+    const moved = keyPool.rekey(new SecretBox(undefined, r.key));
+    keyPool.dataKey = r.wrapped;
+    if (r.created || moved) await savePool();
+    log({ event: "keypool_kms", keyId, createdDataKey: r.created, reencryptedKeys: moved });
+  } catch (e) {
+    log({ event: "keypool_kms_failed", keyId, error: String(e), note: "stored keys stay unreadable until KMS access works" });
+  }
+}
 async function savePool(): Promise<void> {
   await store.pool.save(keyPool.toDoc());
 }
@@ -110,6 +170,8 @@ interface Call {
   /** Policy-resolved Bedrock-style model id (anthropic.claude-...). */
   upstreamModel: string;
   timeoutMs?: number;
+  /** Developer's team: keys reserved for it are preferred, keys reserved for other teams are skipped. */
+  team?: string;
 }
 interface CallResult {
   res: Response;
@@ -180,7 +242,7 @@ async function dispatch(c: Call, sessionKey: string | undefined, notes: string[]
   let lastHttp: CallResult | undefined;
   let lastThrow: unknown;
   for (let i = 0; i < max; i++) {
-    const sel = keyPool.select({ sessionKey, model: c.upstreamModel, exclude: tried });
+    const sel = keyPool.select({ sessionKey, model: c.upstreamModel, exclude: tried, team: c.team });
     if (!sel) break;
     tried.add(sel.id);
     try {
@@ -305,7 +367,8 @@ async function authenticate(req: http.IncomingMessage, res: http.ServerResponse)
 
 async function budgetState(dev: Developer): Promise<BudgetState> {
   if (!hasLimits(dev)) return { exceeded: false, spentUsd: 0, usedTokens: 0 };
-  return evaluateBudget(dev, await store.usage.todayTotals(dev.developerId));
+  const [today, month] = await Promise.all([store.usage.todayTotals(dev.developerId), hasMonthlyLimits(dev) ? store.usage.monthTotals(dev.developerId) : Promise.resolve(undefined)]);
+  return evaluateBudget(dev, today, month);
 }
 
 async function recordUsage(rec: RequestRecord): Promise<void> {
@@ -340,6 +403,14 @@ async function handleMessages(req: http.IncomingMessage, res: http.ServerRespons
   const budget = await budgetState(dev);
   let forceModel: string | undefined;
   const extraHeaders: Record<string, string> = { "x-gateway-developer": dev.developerId, ...budgetHeaders(budget) };
+  if (budget.exceeded && policy.alertOnBudget) {
+    const period = budget.reason?.startsWith("month") ? new Date().toISOString().slice(0, 7) : new Date().toISOString().slice(0, 10);
+    alerter.emit(
+      { kind: "budget.exceeded", severity: "warning", title: `${dev.developerId} reached a ${budget.reason?.startsWith("month") ? "monthly" : "daily"} limit`, detail: budgetMessage(budget), fields: { developer: dev.developerId, team: dev.team, action: cfg.budgetAction } },
+      `budget:${dev.developerId}:${budget.reason}:${period}`,
+      31 * 24 * 3600_000,
+    );
+  }
   if (budget.exceeded) {
     if (cfg.budgetAction === "block") {
       log({ event: "budget_block", developer: dev.developerId, reason: budget.reason, spentUsd: budget.spentUsd, limitUsd: budget.limitUsd, usedTokens: budget.usedTokens, limitTokens: budget.limitTokens });
@@ -369,7 +440,7 @@ async function handleMessages(req: http.IncomingMessage, res: http.ServerRespons
   let call: CallResult;
   try {
     call = await dispatch(
-      { op: "messages", body, betaHeader: tr.betaHeader, stream, query, reqHeaders: req.headers, signal: ac.signal, mode, upstreamModel: tr.upstreamModel },
+      { op: "messages", body, betaHeader: tr.betaHeader, stream, query, reqHeaders: req.headers, signal: ac.signal, mode, upstreamModel: tr.upstreamModel, team: dev.team },
       meta.sessionId ?? dev.developerId,
       tr.notes,
       { developer: dev.developerId },
@@ -379,6 +450,7 @@ async function handleMessages(req: http.IncomingMessage, res: http.ServerRespons
     if (e instanceof PoolExhausted) {
       const sec = Math.max(1, Math.ceil(e.retryAfterMs / 1000));
       log({ event: "keypool_exhausted", developer: dev.developerId, retryAfterSec: sec });
+      alerter.emit({ kind: "pool.exhausted", severity: "critical", title: "Every upstream key is unavailable", detail: `Requests are being answered with 429 (retry in ${sec}s). Add keys, raise limits or enable the gateway-credential fallback.`, fields: { developer: dev.developerId, team: dev.team } }, "pool.exhausted");
       return apiError(res, 429, "rate_limit_error", `${e.message} Retry in ${sec}s.`, { ...extraHeaders, "retry-after": String(sec) });
     }
     const cause = (e as Error & { cause?: unknown }).cause;
@@ -481,7 +553,7 @@ async function handleCountTokens(req: http.IncomingMessage, res: http.ServerResp
   });
   try {
     const { res: r } = await dispatch(
-      { op: "count_tokens", body, betaHeader: tr.betaHeader, stream: false, query, reqHeaders: req.headers, signal: ac.signal, mode: dev.upstreamMode ?? cfg.upstreamMode, upstreamModel: tr.upstreamModel },
+      { op: "count_tokens", body, betaHeader: tr.betaHeader, stream: false, query, reqHeaders: req.headers, signal: ac.signal, mode: dev.upstreamMode ?? cfg.upstreamMode, upstreamModel: tr.upstreamModel, team: dev.team },
       metaFrom(req).sessionId ?? dev.developerId,
       [],
     );
@@ -608,17 +680,30 @@ async function testKey(id: string): Promise<{ ok: boolean; ms: number; status?: 
 async function handleMe(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const dev = await authenticate(req, res);
   if (!dev) return;
-  const t = await store.usage.todayTotals(dev.developerId);
-  const b = hasLimits(dev) ? evaluateBudget(dev, t) : { exceeded: false, spentUsd: t.costUsd, usedTokens: t.inputTokens + t.cacheReadTokens + t.cacheWriteTokens + t.outputTokens };
+  const [t, m, trend] = await Promise.all([store.usage.todayTotals(dev.developerId), store.usage.monthTotals(dev.developerId), store.usage.developerTrend(dev.developerId, 14)]);
+  const b = evaluateBudget(dev, t, m);
+  const tok = (x: { inputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; outputTokens: number }) => x.inputTokens + x.cacheReadTokens + x.cacheWriteTokens + x.outputTokens;
+  const usd = (v: number) => Math.round(v * 1e4) / 1e4;
+  const now = new Date();
   sendJson(res, 200, {
     developerId: dev.developerId,
     team: dev.team ?? null,
-    day: new Date().toISOString().slice(0, 10),
-    limits: { dailyBudgetUsd: dev.dailyBudgetUsd || null, dailyTokenLimit: dev.dailyTokenLimit || null, action: cfg.budgetAction },
-    today: { requests: t.requests, costUsd: Math.round(t.costUsd * 1e4) / 1e4, tokens: t.inputTokens + t.cacheReadTokens + t.cacheWriteTokens + t.outputTokens, cacheHitPct: hitPct(t) },
+    day: now.toISOString().slice(0, 10),
+    limits: {
+      dailyBudgetUsd: dev.dailyBudgetUsd || null,
+      dailyTokenLimit: dev.dailyTokenLimit || null,
+      monthlyBudgetUsd: dev.monthlyBudgetUsd || null,
+      monthlyTokenLimit: dev.monthlyTokenLimit || null,
+      action: cfg.budgetAction,
+    },
+    today: { requests: t.requests, costUsd: usd(t.costUsd), savedUsd: usd(t.savedUsd), tokens: tok(t), outputTokens: t.outputTokens, cacheHitPct: hitPct(t) },
+    month: { requests: m.requests, costUsd: usd(m.costUsd), savedUsd: usd(m.savedUsd), tokens: tok(m), cacheHitPct: hitPct(m) },
+    trend: trend.map((p) => ({ day: p.day, costUsd: usd(p.costUsd), tokens: tok(p), requests: p.requests })),
     exceeded: b.exceeded,
+    exceededReason: b.reason ?? null,
     allowedModels: dev.allowedModels?.length ? dev.allowedModels : null,
     resetsAt: `${new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)}T00:00:00Z`,
+    monthResetsAt: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString(),
   });
 }
 
@@ -630,6 +715,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, api: cfg.upstreamMode, upstream: upstreamLabel(), auth: upstream.authMode, store: store.kind, marketplace: marketplace.state, keys: pool });
     }
     if (req.method === "GET" && path === "/v1/me") return await handleMe(req, res);
+    if (req.method === "GET" && (path === "/me" || path.startsWith("/me/"))) return serveMePage(res, path);
     if (req.method === "HEAD" && path === "/api/hello") {
       res.writeHead(200);
       return res.end();
@@ -638,7 +724,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(302, { location: "/admin/" });
       return res.end();
     }
-    if (adminToken && (await handleAdmin(req, res, path, params, { cfg: baseCfg, store, auth, adminToken, getPolicy: () => policy, setPolicy, startedAt, catalog, runtimeEndpoint, version: VERSION, authMode: upstream.authMode, marketplace: () => marketplace.state, diagnose, previewPolicy, pool: keyPool, savePool, testKey }))) return;
+    if ((adminToken || oidc) && (await handleAdmin(req, res, path, params, { cfg: baseCfg, store, auth, adminToken, getPolicy: () => policy, setPolicy, startedAt, catalog, runtimeEndpoint, version: VERSION, authMode: upstream.authMode, marketplace: () => marketplace.state, diagnose, previewPolicy, pool: keyPool, savePool, testKey, alerter, oidc }))) return;
     if (req.method === "GET" && path === "/v1/models") {
       const dev = await authenticate(req, res);
       if (!dev) return;
@@ -675,8 +761,11 @@ if (marketplaceSettings.productCode) {
 
 await reloadPolicy();
 await reloadPool();
+await initKms();
+await syncKeyStates();
 await seedPoolUsage();
 if (store.kind === "dynamo") {
+  setInterval(() => void syncKeyStates(), 10_000).unref();
   setInterval(() => void reloadPolicy(), 30_000).unref();
   setInterval(() => void reloadPool(), 30_000).unref();
   setInterval(() => void seedPoolUsage(), 60_000).unref();
@@ -699,6 +788,8 @@ server.listen(cfg.port, () => {
     budgetAction: cfg.budgetAction,
     keys: keyPool.view().summary,
     keyStrategy: keyPool.settings.strategy,
+    keyEncryption: keyPool.encryption,
+    sso: oidc ? oidc.cfg.issuer : "off",
   });
 });
 

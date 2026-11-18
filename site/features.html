@@ -27,7 +27,7 @@
 
 <section>
   <div class="container">
-    <h2>Key pool <span class="grad">new in v0.2</span></h2>
+    <h2>Key pool <span class="grad">v0.2 · extended in v0.3</span></h2>
     <p class="section-lead">Many upstream keys, one endpoint. Developers keep a single <code>ANTHROPIC_BASE_URL</code>, and the gateway decides which key serves each request.</p>
     <div class="grid grid-3">
       <div class="card"><div class="icon">🔁</div><h3>Four rotation strategies</h3><p><b>Per session</b> (default) spreads new sessions and keeps each one on its key so the prompt cache stays warm. Also <b>round-robin</b>, <b>fill-first</b> by priority, and <b>least-used</b>.</p></div>
@@ -39,6 +39,9 @@
       <div class="card"><div class="icon">📊</div><h3>Per-key analytics</h3><p>Requests, tokens, cost, failovers, live sessions and remaining rate limit per key, plus a "by upstream key" breakdown on the dashboard.</p></div>
       <div class="card"><div class="icon">🔐</div><h3>Encrypted at rest</h3><p>AES-256-GCM with <code>KEY_POOL_SECRET</code>. Keys are tested on save, shown only as their last four characters, and never logged.</p></div>
       <div class="card"><div class="icon">🧾</div><h3>Config as code</h3><p>Manage keys in the console, or ship them read-only with <code>PROVIDER_KEYS_JSON</code> from Secrets Manager.</p></div>
+      <div class="card"><div class="icon">👥</div><h3>Team key groups</h3><p>Reserve keys for teams. A team uses its own keys first and overflows to shared keys; other teams never see them.</p></div>
+      <div class="card"><div class="icon">⏲</div><h3>Bedrock quotas</h3><p>Enter a key's tokens and requests per minute. The gateway tracks a sliding minute and parks the key just before throttling.</p></div>
+      <div class="card"><div class="icon">🌐</div><h3>Multi-task safe</h3><p>Cooldowns are shared between gateway tasks and survive restarts. Rendezvous hashing puts a session on the same key on every task.</p></div>
     </div>
     <p class="section-lead" style="margin-top:18px">Limits apply per Anthropic organization and per AWS account and region. Keys from the same org share one limit; keys from separate orgs or accounts add up.</p>
   </div>
@@ -60,6 +63,20 @@
       <div class="card"><div class="icon">🙋</div><h3>Developer self-service</h3><p><code>GET /v1/me</code> with a personal token returns today's spend, tokens, cache hit rate and limits. No admin access needed.</p></div>
       <div class="card"><div class="icon">🧾</div><h3>Audit trail</h3><p>Every admin action is logged: developers, policy, prices and key changes, never secrets.</p></div>
       <div class="card"><div class="icon">🔀</div><h3>Two Bedrock APIs</h3><p>Mantle (Messages API) or Runtime (<code>InvokeModel</code>), switchable live, per policy, per developer or per key.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>Operations <span class="grad">new in v0.3</span></h2>
+    <div class="grid grid-3">
+      <div class="card"><div class="icon">⚡</div><h3>One-command deploy</h3><p><code>install.sh</code> sets up Docker, Caddy with automatic HTTPS and fresh secrets on any Linux server. Multi-arch images on <code>ghcr.io/uurtech/tokener</code>.</p></div>
+      <div class="card"><div class="icon">🔔</div><h3>Alerts</h3><p>Slack, Discord, Microsoft Teams or any JSON webhook. Key failures, pool exhaustion, recoveries and developer limits, throttled so nobody gets flooded.</p></div>
+      <div class="card"><div class="icon">🔑</div><h3>Admin SSO</h3><p>Sign in with Google Workspace, Okta, Entra ID, Auth0 or Keycloak (OpenID Connect + PKCE), limited to your domains. Every admin action carries the person's e-mail.</p></div>
+      <div class="card"><div class="icon">📆</div><h3>Monthly budgets</h3><p>Monthly USD and token caps per developer, next to the daily ones, with warning headers at 80%.</p></div>
+      <div class="card"><div class="icon">🙋</div><h3>Developer page</h3><p>Developers open <code>/me</code> with their own token to see today's and this month's spend, limits with reset times and a 14-day trend.</p></div>
+      <div class="card"><div class="icon">🗝</div><h3>KMS encryption</h3><p>On AWS, pool keys are sealed under a KMS data key. Revoke one IAM permission and every stored key is unreadable; every unseal is in CloudTrail.</p></div>
     </div>
   </div>
 </section>

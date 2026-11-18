@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My usage · tokener</title>
+<link rel="stylesheet" href="/admin/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M9 11h14M16 11v11' stroke='%23fff' stroke-width='3.2' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+  .me-wrap { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+  .me-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; gap: 12px; flex-wrap: wrap; }
+  .me-limits { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  @media (max-width: 760px) { .me-limits { grid-template-columns: 1fr; } .tiles { grid-template-columns: repeat(2, 1fr) !important; } }
+  .me-limits .usage { margin-bottom: 12px; } .me-limits h3 { margin: 0 0 10px; font-size: 13px; }
+  .me-top .brand { gap: 10px; } .me-top .brand b, .me-top .brand small { display: block; } .me-top .brand b { font-size: 16px; }
+  .alert-box { border: 1px solid var(--bad); background: var(--bad-soft); color: var(--bad); border-radius: var(--r); padding: 10px 14px; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<section id="login" class="login hidden">
+  <form id="loginForm" class="login-card">
+    <div class="brand big"><span class="logo">t</span><div><b>tokener</b><small>My Claude Code usage</small></div></div>
+    <h1>See your usage and limits</h1>
+    <p class="muted">Paste your personal gateway token: the <code>ANTHROPIC_AUTH_TOKEN</code> value from your <code>~/.claude/settings.json</code>. It stays in this browser.</p>
+    <label>Gateway token <input id="tokenInput" type="password" placeholder="cgw_…" autocomplete="off" required></label>
+    <button type="submit">Show my usage</button>
+    <p id="loginErr" class="err"></p>
+  </form>
+</section>
+
+<div id="page" class="me-wrap hidden">
+  <div class="me-top">
+    <div class="brand"><span class="logo">t</span><div><b id="who">tokener</b><small class="muted" id="whoSub"></small></div></div>
+    <div><button class="ghost" id="refresh">↻ Refresh</button> <button class="ghost" id="logout">Forget token</button></div>
+  </div>
+  <div id="exceeded" class="alert-box hidden"></div>
+  <div class="tiles tiles-4">
+    <div class="tile"><span class="label">Spent today</span><span class="value" id="tToday">–</span><span class="sub" id="tTodaySub"></span></div>
+    <div class="tile"><span class="label">Tokens today</span><span class="value" id="tTok">–</span><span class="sub" id="tTokSub"></span></div>
+    <div class="tile"><span class="label">This month</span><span class="value" id="tMonth">–</span><span class="sub" id="tMonthSub"></span></div>
+    <div class="tile"><span class="label">Cache hit today</span><span class="value" id="tHit">–</span><span class="sub">higher is cheaper</span></div>
+  </div>
+  <div class="card me-limits">
+    <div><h3>Daily limits <span class="muted small" id="dayReset"></span></h3><div id="dayLimits"></div></div>
+    <div><h3>Monthly limits <span class="muted small" id="monthReset"></span></h3><div id="monthLimits"></div></div>
+  </div>
+  <div class="card" style="margin-top:16px"><h2>Last 14 days <span class="muted">estimated cost, USD</span></h2><div class="chart" id="trend"></div></div>
+  <div class="grid2" style="margin-top:16px">
+    <div class="card"><h2>Models you can use</h2><div id="models" class="chips"></div><p class="muted small">Pick one in Claude Code with <code>/model</code>.</p></div>
+    <div class="card"><h2>Tips to spend less</h2><ul class="muted small">
+      <li>Keep one session per task; long sessions resend more context every turn.</li>
+      <li>Use <code>/compact</code> when the context gets long, and <code>/clear</code> between unrelated tasks.</li>
+      <li>Pipe long command output through <code>| tail -50</code> instead of pasting whole logs.</li>
+      <li>Short breaks keep the prompt cache warm; it expires after about 5 minutes of inactivity.</li>
+    </ul></div>
+  </div>
+  <p class="muted small" style="margin-top:16px">Costs are estimates from list prices. Limits and policy are set by your gateway admin.</p>
+</div>
+<div id="tip" class="tip hidden"></div>
+<script type="module" src="/me/me.js"></script>
+</body>
+</html>

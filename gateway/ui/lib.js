@@ -33,10 +33,14 @@ export const auth = {
 export class ApiError extends Error { constructor(status, message, details) { super(message); this.status = status; this.details = details; } }
 let onUnauthorized = () => {};
 export const setUnauthorizedHandler = (fn) => (onUnauthorized = fn);
+/** Signed in through SSO (session cookie) instead of the admin token. */
+export const session = { sso: false, email: null };
 export async function api(path, opts = {}) {
   const r = await fetch(`/admin/api${path}`, {
     method: opts.method || "GET",
-    headers: { authorization: `Bearer ${auth.token}`, "content-type": "application/json", ...(opts.headers || {}) },
+    credentials: "same-origin",
+    // X-Requested-With is required for cookie (SSO) writes: the gateway's CSRF guard.
+    headers: { ...(auth.token ? { authorization: `Bearer ${auth.token}` } : {}), "x-requested-with": "tokener", "content-type": "application/json", ...(opts.headers || {}) },
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   });
   if (r.status === 401) { onUnauthorized(); throw new ApiError(401, "Unauthorized"); }

@@ -1,7 +1,7 @@
 /* Policy editor: sectioned form with sticky section nav, live preview of the effect on real request shapes, and an unsaved-changes bar. */
 import { $, $$, api, esc, fmtUsd, fmtK, shortModel, toast, debounce, getPolicy, getCatalog, invalidate, skeleton } from "../lib.js";
 
-const SECTIONS = [["api", "Bedrock API"], ["routing", "Model routing"], ["effort", "Effort"], ["limits", "Daily limits"], ["hygiene", "Context hygiene"], ["operator", "Operator instruction"], ["map", "Model map"]];
+const SECTIONS = [["api", "Bedrock API"], ["routing", "Model routing"], ["effort", "Effort"], ["limits", "Limits"], ["alerts", "Alerts"], ["hygiene", "Context hygiene"], ["operator", "Operator instruction"], ["map", "Model map"]];
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 export async function render(main) {
@@ -39,13 +39,19 @@ export async function render(main) {
     <section class="card psec" id="s-effort"><h2>Effort</h2>
       <div class="row2">${seg("effortMode", [["off", "Off", "leave untouched"], ["fill", "Fill", "only when absent"], ["override", "Override", "always set"]], saved.effortMode)}
       <div><label class="lbl">Default effort</label><div class="segmented" style="grid-template-columns:repeat(5,1fr)">${EFFORTS.map((e) => `<label><input type="radio" name="defaultEffort" value="${e}" ${saved.defaultEffort === e ? "checked" : ""}><span><b>${e}</b></span></label>`).join("")}</div></div></div></section>
-    <section class="card psec" id="s-limits"><h2>Daily limits</h2>
+    <section class="card psec" id="s-limits"><h2>Limits <span class="muted small">daily and monthly caps are set per developer</span></h2>
       <label class="lbl">When a developer exceeds a limit</label>
-      ${seg("budgetAction", [["warn", "Warn", "response header only"], ["downgrade", "Downgrade", "new conversations → fallback model"], ["block", "Block", "429 until 00:00 UTC"]], saved.budgetAction)}
+      ${seg("budgetAction", [["warn", "Warn", "response header only"], ["downgrade", "Downgrade", "new conversations → fallback model"], ["block", "Block", "429 until the limit resets"]], saved.budgetAction)}
       <div class="row3" style="margin-top:12px">
         ${modelInput("downgradeModel", saved.downgradeModel, "anthropic.claude-sonnet-5-5", "Fallback model")}
         <label>Default daily budget for new developers <span class="muted">(USD, 0 = none)</span><input name="defaultDailyBudgetUsd" type="number" min="0" step="1" value="${saved.defaultDailyBudgetUsd}"></label>
         <label>Default daily token limit <span class="muted">(0 = none)</span><input name="defaultDailyTokenLimit" type="number" min="0" step="100000" value="${saved.defaultDailyTokenLimit}"></label>
+      </div></section>
+    <section class="card psec" id="s-alerts"><h2>Alerts <span class="muted small">Slack · Discord · Microsoft Teams · any JSON webhook</span></h2>
+      <div class="row2">
+        <label>Webhook URL <input name="alertWebhookUrl" type="url" placeholder="https://hooks.slack.com/services/…" value="${esc(saved.alertWebhookUrl || "")}" spellcheck="false"><small class="muted">Sent when a key is rejected, runs out of credit or keeps failing, when every key is unavailable, and when a key recovers.</small></label>
+        <div><label class="switch-row big"><input type="checkbox" name="alertOnBudget" class="switch" ${saved.alertOnBudget !== false ? "checked" : ""}><span><b>Alert on developer limits</b><small>once per developer per day / month when a cap is reached</small></span></label>
+        <button type="button" class="ghost" id="testAlert">Send test alert</button> <span class="muted small" id="alertMsg">Save first if you changed the URL.</span></div>
       </div></section>
     <section class="card psec" id="s-hygiene"><h2>Context hygiene</h2>
       <div class="row3">
@@ -57,6 +63,12 @@ export async function render(main) {
       <textarea name="operatorPrompt" rows="4" placeholder="e.g. When running tests or builds, limit output with \`| tail -50\`. Use the Explore subagent for codebase discovery.">${esc(saved.operatorPrompt)}</textarea></section>
     <section class="card psec" id="s-map"><h2>Model map <span class="muted small">alias Claude Code sends → Bedrock id</span> <button type="button" class="tiny ghost" id="addRow">+ Add alias</button></h2>
       <table class="data compact map" id="mapTbl"></table></section>`;
+
+  $("#testAlert").addEventListener("click", async () => {
+    $("#alertMsg").textContent = "Sending…";
+    try { const r = await api("/alerts/test", { method: "POST" }); $("#alertMsg").textContent = r.delivered ? "Delivered ✓" : r.error; }
+    catch (e) { $("#alertMsg").textContent = e.message; }
+  });
 
   /* ---- model map table ---- */
   let map = Object.entries(saved.modelMap);
@@ -79,8 +91,9 @@ export async function render(main) {
     budgetAction: F("budgetAction").value, downgradeModel: F("downgradeModel").value.trim(),
     defaultDailyBudgetUsd: Number(F("defaultDailyBudgetUsd").value || 0), defaultDailyTokenLimit: Number(F("defaultDailyTokenLimit").value || 0),
     pricing: saved.pricing,
+    alertWebhookUrl: F("alertWebhookUrl").value.trim(), alertOnBudget: F("alertOnBudget").checked,
   });
-  const LABELS = { upstreamMode: "API", bedrockProfilePrefix: "profile prefix", modelMap: "model map", routeSubagentModel: "subagent routing", routeAuxiliaryModel: "auxiliary routing", routeCompactionModel: "compaction routing", effortMode: "effort mode", defaultEffort: "default effort", operatorPrompt: "operator instruction", cacheTtl1h: "cache TTL", toolResultMaxChars: "tool_result cap", bridgeBedrock: "bridging", budgetAction: "limit action", downgradeModel: "fallback model", defaultDailyBudgetUsd: "default budget", defaultDailyTokenLimit: "default token limit" };
+  const LABELS = { upstreamMode: "API", bedrockProfilePrefix: "profile prefix", modelMap: "model map", routeSubagentModel: "subagent routing", routeAuxiliaryModel: "auxiliary routing", routeCompactionModel: "compaction routing", effortMode: "effort mode", defaultEffort: "default effort", operatorPrompt: "operator instruction", cacheTtl1h: "cache TTL", toolResultMaxChars: "tool_result cap", bridgeBedrock: "bridging", budgetAction: "limit action", downgradeModel: "fallback model", defaultDailyBudgetUsd: "default budget", defaultDailyTokenLimit: "default token limit", alertWebhookUrl: "alert webhook", alertOnBudget: "budget alerts" };
   const changedKeys = (d) => Object.keys(LABELS).filter((k) => JSON.stringify(d[k]) !== JSON.stringify(saved[k]));
 
   /* ---- preview ---- */

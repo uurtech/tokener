@@ -22,6 +22,7 @@ import * as ecsPatterns from "aws-cdk-lib/aws-ecs-patterns";
 import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as kms from "aws-cdk-lib/aws-kms";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as cw from "aws-cdk-lib/aws-cloudwatch";
 import * as cwActions from "aws-cdk-lib/aws-cloudwatch-actions";
@@ -204,6 +205,10 @@ export class MarketplaceStack extends Stack {
     createdTaskRole.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("AWSMarketplaceMeteringRegisterUsage"));
     keys.grantReadWriteData(createdTaskRole);
     usage.grantReadWriteData(createdTaskRole);
+    // Upstream pool keys are sealed under a KMS data key. With ExistingTaskRoleArn, give that role
+    // kms:Decrypt + kms:GenerateDataKey on this key yourself (see docs/MARKETPLACE.md).
+    const poolKey = new kms.Key(this, "KeyPoolKey", { enableKeyRotation: true, description: "tokener: encrypts upstream API keys stored by the gateway", removalPolicy: RemovalPolicy.RETAIN });
+    poolKey.grant(createdTaskRole, "kms:Decrypt", "kms:GenerateDataKey");
     // The role is created unconditionally: ECS adds DependsOn edges from the service to the task role and
     // CloudFormation rejects DependsOn on a resource whose Condition is false. With ExistingTaskRoleArn the
     // created role is simply left unused (no cost, no trust outside the account).
@@ -250,6 +255,7 @@ export class MarketplaceStack extends Stack {
         BRIDGE_BEDROCK: "true",
         EFFORT_MODE: "off",
         BUDGET_ACTION: "warn",
+        KEY_POOL_KMS_KEY_ID: poolKey.keyArn,
       },
       secrets: { ADMIN_TOKEN: ecs.Secret.fromSecretsManager(adminSecret) },
       healthCheck: { command: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health || exit 1"], interval: Duration.seconds(30), timeout: Duration.seconds(5), retries: 3, startPeriod: Duration.seconds(20) },

@@ -1,0 +1,16 @@
+{$DOMAIN} {
+	# No `encode`: compression would buffer the SSE stream Claude Code reads token by token.
+	reverse_proxy tokener:8080 {
+		# stream model output immediately, and allow long thinking turns
+		flush_interval -1
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		-Server
+	}
+}

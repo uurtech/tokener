@@ -19,7 +19,7 @@
 <main>
 <section class="hero">
   <div class="container">
-    <p class="eyebrow">Open source · MIT · v0.2.0 · new: key pool with automatic failover</p>
+    <p class="eyebrow">Open source · MIT · v0.3.0 · new: one-command deploy, alerts, SSO, team key groups</p>
     <h1>One endpoint. Many keys. <span class="grad">No more rate-limit walls.</span></h1>
     <p class="lead">tokener is a drop-in gateway for Claude Code. Put API keys from five Anthropic organizations or AWS accounts behind it and your team gets roughly five times the headroom. When one key hits its limit, the next one takes over before the developer notices. It also measures and cuts what every token costs. Developers install nothing: they get a URL and a personal token.</p>
     <div class="btn-row">
@@ -42,6 +42,21 @@
 
 <section>
   <div class="container">
+    <h2>Live in five minutes</h2>
+    <p class="section-lead">One command on any Linux server: Docker, automatic HTTPS and generated secrets. You get a URL to give your team and an admin link to add keys.</p>
+    <pre><code>curl -fsSL https://raw.githubusercontent.com/uurtech/tokener/master/deploy/install.sh \
+  | sudo bash -s -- claude-gw.example.com</code></pre>
+    <div class="grid grid-3" style="margin-top:18px">
+      <div class="card"><h3>1 · Install</h3><p>Point a DNS record at the server and run the line above. Caddy fetches a Let's Encrypt certificate. No AWS account is needed when you use pool keys.</p></div>
+      <div class="card"><h3>2 · Add keys</h3><p>Open the admin link, add your Anthropic and Bedrock API keys, and pick a rotation strategy. Each key is tested before it joins.</p></div>
+      <div class="card"><h3>3 · Invite</h3><p>Create a developer and send the two-line <code>settings.json</code> snippet. They run <code>claude</code> as usual.</p></div>
+    </div>
+    <p class="section-lead" style="margin-top:14px">Prefer your own AWS account? <code>npx cdk deploy</code> sets up Fargate, DynamoDB, an ALB and a KMS key. Or use the container directly: <code>ghcr.io/uurtech/tokener</code>.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
     <h2>Stop raising limits. Add keys instead.</h2>
     <p class="section-lead">One API key means one rate limit and one spend cap for the whole team. On a busy afternoon everyone hits the same wall at the same time. tokener spreads the load over every key you give it and switches keys without anyone noticing.</p>
     <div class="grid grid-3">
@@ -50,7 +65,10 @@
       <div class="card"><div class="icon">📉</div><h3>Switches before the wall</h3><p>tokener reads Anthropic's rate-limit headers. When a key drops below 5% of any limit, new work moves to another key before the first 429 arrives.</p></div>
       <div class="card"><div class="icon">🧩</div><h3>Anthropic and Bedrock, mixed</h3><p>Combine <code>sk-ant-…</code> keys and Bedrock API keys in one pool. Limits apply per Anthropic organization and per AWS account and region, so keys from separate orgs and accounts each add their own quota.</p></div>
       <div class="card"><div class="icon">🎯</div><h3>Per-key caps and analytics</h3><p>Give any key a daily token or USD cap. See requests, tokens, cost, failovers, live sessions and remaining rate limit for every key.</p></div>
-      <div class="card"><div class="icon">🔐</div><h3>Keys stay secret</h3><p>Secrets are encrypted at rest with AES-256-GCM, tested with a free <code>count_tokens</code> call when added, and never shown again. Developers never see them.</p></div>
+      <div class="card"><div class="icon">🔐</div><h3>Keys stay secret</h3><p>Secrets are encrypted at rest with AES-256-GCM, under an AWS KMS data key on AWS, tested with a free <code>count_tokens</code> call when added, and never shown again. Developers never see them.</p></div>
+      <div class="card"><div class="icon">🔔</div><h3>Know before they do</h3><p>Slack, Discord or Teams alerts when a key is rejected, runs out of credit or keeps failing, when every key is busy, and when a developer reaches a limit.</p></div>
+      <div class="card"><div class="icon">👥</div><h3>Keys per team</h3><p>Reserve keys for a team so each team runs on its own organization or AWS account. The team overflows to shared keys when its own are busy.</p></div>
+      <div class="card"><div class="icon">⏲</div><h3>Bedrock-aware</h3><p>Bedrock sends no rate-limit headers, so tokener counts tokens and requests per minute against your quota and switches before throttling starts.</p></div>
     </div>
     <figure class="shot" style="margin-top:28px"><img src="assets/img/ui-keys.png" alt="tokener upstream keys page: five keys, one cooling down after a 429, one parked near its rate limit" loading="lazy"></figure>
   </div>

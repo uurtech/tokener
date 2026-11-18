@@ -1,6 +1,6 @@
 import type { Usage } from "../pricing.js";
 import type { Policy } from "../policy-state.js";
-import type { PoolDoc } from "../keypool.js";
+import type { PoolDoc, SharedKeyState } from "../keypool.js";
 
 export interface DeveloperRecord {
   developerId: string;
@@ -11,6 +11,10 @@ export interface DeveloperRecord {
   dailyBudgetUsd?: number;
   /** Total tokens (input + cache read + cache write + output) per UTC day. 0 / undefined = no cap. */
   dailyTokenLimit?: number;
+  /** Estimated USD per calendar month (UTC). 0 / undefined = no cap. */
+  monthlyBudgetUsd?: number;
+  /** Total tokens per calendar month (UTC). 0 / undefined = no cap. */
+  monthlyTokenLimit?: number;
   /** Bedrock/alias ids this developer may request. Empty / undefined = every model. Operator routing is exempt. */
   allowedModels?: string[];
   /** Per-developer API override; undefined = follow the policy's upstreamMode. */
@@ -22,6 +26,8 @@ export interface DeveloperRecord {
 export interface DeveloperPatch {
   dailyBudgetUsd?: number;
   dailyTokenLimit?: number;
+  monthlyBudgetUsd?: number;
+  monthlyTokenLimit?: number;
   team?: string;
   /** Empty array clears the restriction. */
   allowedModels?: string[];
@@ -93,6 +99,10 @@ export interface Overview {
 export interface UsageStore {
   record(rec: RequestRecord): Promise<void>;
   todayTotals(developerId: string): Promise<DailyTotals>;
+  /** Current calendar month (UTC) totals for one developer. */
+  monthTotals(developerId: string): Promise<DailyTotals>;
+  /** One developer's daily totals for the last `days` UTC days (oldest first, zero-filled). */
+  developerTrend(developerId: string, days: number): Promise<TrendPoint[]>;
   overview(day: string): Promise<Overview>;
   recentRequests(opts: RequestFilter): Promise<RequestRecord[]>;
   /** Daily totals for the last `days` UTC days (oldest first, missing days filled with zeros). */
@@ -135,6 +145,9 @@ export interface PolicyStore {
 export interface PoolStore {
   load(): Promise<PoolDoc | null>;
   save(doc: PoolDoc): Promise<void>;
+  /** Per-key cooldown state, shared by every gateway task and kept across restarts. */
+  saveState(id: string, st: SharedKeyState): Promise<void>;
+  loadStates(): Promise<Record<string, SharedKeyState>>;
 }
 
 export interface Store {

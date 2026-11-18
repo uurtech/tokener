@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.0 — 2026-11-18
+
+Deploy in five minutes, and the key pool grows up.
+
+- **One-command deploy:** `deploy/install.sh` (Docker + Caddy with automatic HTTPS + generated secrets),
+  `deploy/docker-compose.yml`, multi-arch images on `ghcr.io/uurtech/tokener`, CI on every push.
+- **Alerts:** Slack / Discord / Teams / generic webhook for keys that are rejected, out of credit or keep failing,
+  pool exhaustion, recoveries and developer limits; throttled, test button and history in the console.
+- **Team key groups:** keys reserved for developer teams, used first by that team, invisible to others.
+- **Bedrock quotas:** per-key tokens/requests per minute tracked locally; keys are parked before throttling.
+- **Shared key state:** cooldowns persisted in the store, shared across tasks (DynamoDB) and kept across restarts;
+  rendezvous hashing assigns sessions consistently across tasks.
+- **Monthly budgets** (USD and tokens) per developer, with headers, 429 message and alert.
+- **Developer page `/me`** and a richer `/v1/me` (month totals, 14-day trend, reset times).
+- **Admin SSO** with OpenID Connect (PKCE, JWKS verification, domain / e-mail allowlist, signed cookies, CSRF guard,
+  actor in the audit log).
+- **KMS envelope encryption** for pool keys (`KEY_POOL_KMS_KEY_ID`), created by the CDK and Marketplace stacks;
+  automatic re-encryption when switching.
+- Fixed: Dockerfile license label (MIT), `KEY_POOL_SECRET` passed through the local compose file.
+
 ## 0.2.0 — 2026-11-18
 
 Key pool: many upstream keys, one endpoint.

@@ -13,7 +13,8 @@ export async function render(main) {
         <p class="muted small">Developers paste this into <code>~/.claude/settings.json</code> and replace the token. <code>/model</code> lists what this gateway serves them.</p>
         <pre class="small" id="snippet"></pre></div>
       <div class="card"><h2>Audit log <span class="muted small">admin actions, newest first</span></h2><div class="scroll" id="audit">${skeleton(6)}</div></div>
-    </div>`;
+    </div>
+    <div class="card"><h2>Recent alerts <a class="link-btn" href="#/policy">configure →</a></h2><div class="scroll" id="alerts">${skeleton(3)}</div></div>`;
   $("#snippet").textContent = settingsSnippet();
   $("#copySnippet").addEventListener("click", () => copy(settingsSnippet()));
 
@@ -22,6 +23,8 @@ export async function render(main) {
     ["Version", `tokener ${c.version}`], ["Uptime", fmtDur(c.uptimeSec)], ["Region", c.region], ["Store", c.store],
     ["Default API", c.upstreamMode === "runtime" ? `Runtime · ${c.runtimeEndpoint}` : `Mantle · ${c.upstreamBaseUrl}`],
     ["Credentials", c.authMode === "api-key" ? "Bedrock API key" : "IAM role / SigV4"],
+    ["Key encryption", c.keyEncryption === "kms" ? "AWS KMS data key" : c.keyEncryption === "secret" ? "KEY_POOL_SECRET (AES-256-GCM)" : "not configured"],
+    ["Admin sign-in", c.sso ? `SSO · ${c.sso.issuer}${c.sso.domains.length ? ` · ${c.sso.domains.join(", ")}` : ""}` : "admin token"],
     ["Marketplace", c.marketplace], ["Model catalog", c.catalog.enabled ? `${c.catalog.models} models${c.catalog.error ? ` · error: ${c.catalog.error}` : ""}` : "disabled"],
     ["Node", c.node], ["Started", `${c.startedAt.replace("T", " ").slice(0, 19)} UTC`],
   ].map(([k, v]) => `<div><small>${k}</small><b>${esc(v)}</b></div>`).join("");
@@ -41,6 +44,10 @@ export async function render(main) {
   $("#audit").innerHTML = au.length
     ? `<table class="data compact"><tr><th>When</th><th>Action</th><th>Target</th><th>Details</th></tr>${au.map((e) => `<tr><td title="${esc(e.ts)}">${esc(fmtAgo(e.ts))}</td><td>${pill(e.action, e.action.includes("revoke") ? "off" : e.action.includes("create") || e.action.includes("enable") ? "on" : "")}</td><td>${esc(e.target || "–")}</td><td class="muted small mono">${esc(summarize(e.details))}</td></tr>`).join("")}</table>`
     : emptyState("No admin actions yet");
+  const al = await api("/alerts");
+  $("#alerts").innerHTML = al.history.length
+    ? `<table class="data compact"><tr><th>When</th><th>Severity</th><th>Alert</th><th>Delivery</th></tr>${al.history.map((a) => `<tr><td title="${esc(a.ts)}">${esc(fmtAgo(a.ts))}</td><td>${pill(a.severity, a.severity === "critical" ? "off" : a.severity === "info" ? "on" : "warn")}</td><td>${esc(a.title)}</td><td class="muted small">${a.delivered ? "sent" : esc(a.error || "not sent")}</td></tr>`).join("")}</table>`
+    : emptyState("No alerts since the gateway started", al.webhookConfigured ? "The webhook is configured." : "No webhook yet: alerts are only written to the log. Add one on the Policy page.");
   return {};
 }
 const summarize = (d) => (d ? Object.entries(d).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join("|") : typeof v === "object" && v !== null ? JSON.stringify(v) : v}`).join("  ").slice(0, 160) : "");

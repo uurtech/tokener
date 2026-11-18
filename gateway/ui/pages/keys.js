@@ -9,8 +9,9 @@ const STRATEGIES = [
 const STATUS = {
   active: ["active", "on"], parked: ["near limit", "warn"], cooling: ["cooling down", "off"], capped: ["daily cap hit", "warn"], disabled: ["disabled", ""], error: ["error", "off"],
 };
+const REASONS_EXTRA = { "near_limit:rpm": "near its requests/min quota", "near_limit:tpm": "near its tokens/min quota" };
 const REASONS = { rate_limited: "rate limited (429)", overloaded: "overloaded", auth_failed: "key rejected (401)", forbidden: "forbidden (403)", credit_exhausted: "out of credit", upstream_error: "upstream 5xx", network: "network error", decrypt_failed: "cannot decrypt" };
-const reasonText = (r) => (!r ? "" : r.startsWith("near_limit:") ? `${r.slice(11)} bucket under threshold` : REASONS[r] || r);
+const reasonText = (r) => (!r ? "" : REASONS_EXTRA[r] || (r.startsWith("near_limit:") ? `${r.slice(11)} bucket under threshold` : REASONS[r] || r));
 const fmtSec = (s) => (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`);
 
 let data = null;
@@ -31,7 +32,7 @@ export async function render(main, params) {
         <button type="submit" id="savePool">Save</button>
       </div></form></div>
     <div class="card table-card"><div class="scroll" id="tbl">${skeleton(4)}</div></div>
-    <p class="muted small">Keys are encrypted at rest (AES-256-GCM, <code>KEY_POOL_SECRET</code>) and never shown again after saving. Request errors such as a malformed body are not retried; only key-level failures are. A request that has already started streaming is never switched. Rate and spend limits apply per Anthropic organization and per AWS account and region: keys from the same org share one limit, keys from separate orgs or accounts add up.</p>`;
+    <p class="muted small">Keys are encrypted at rest (AES-256-GCM<span id="encMode"></span>) and never shown again after saving. Request errors such as a malformed body are not retried; only key-level failures are. A request that has already started streaming is never switched. Rate and spend limits apply per Anthropic organization and per AWS account and region: keys from the same org share one limit, keys from separate orgs or accounts add up.</p>`;
 
   $("#new").addEventListener("click", () => openEditor(null));
   $("#poolForm").addEventListener("submit", async (e) => {
@@ -65,6 +66,7 @@ function draw(withForm) {
     const f = $("#poolForm").elements;
     f.strategy.value = settings.strategy; f.softLimitPct.value = settings.softLimitPct; f.maxAttempts.value = settings.maxAttempts; f.envFallback.checked = settings.envFallback;
     $("#envLabel").textContent = envCredential ? `${envCredential}, used only when every key is unavailable` : "none configured";
+    const enc = $("#encMode"); if (enc) enc.innerHTML = data.encryption === "kms" ? " under an AWS KMS data key" : data.encryption === "secret" ? " with <code>KEY_POOL_SECRET</code>" : ", but no secret is configured";
   }
   if (!keys.length) {
     $("#tbl").innerHTML = emptyState("No upstream keys yet", `Requests use ${esc(envCredential || "the gateway's own AWS credentials")}. Add two or more Anthropic or Bedrock API keys to rotate between them and fail over automatically.`);
@@ -77,7 +79,7 @@ function draw(withForm) {
       const cap = k.dailyTokenLimit ? ` / ${fmtK(k.dailyTokenLimit)}` : "";
       const rate = k.rate ? `<div class="usage ${k.rate.minRemainingPct < 10 ? "bad" : k.rate.minRemainingPct < 30 ? "warn" : "ok"}"><div class="usage-txt"><span>${k.rate.minRemainingPct}%</span><span class="muted">${esc(k.rate.bucket)}</span></div><div class="progress"><i style="width:${k.rate.minRemainingPct}%"></i></div></div>` : `<span class="muted small">${k.kind === "bedrock" ? "reacts to 429s" : "no data yet"}</span>`;
       return `<tr data-id="${esc(k.id)}" class="${k.enabled ? "" : "dim-row"}">
-        <td><div class="key-id"><b>${esc(k.label)}</b><small>${chip(k.kind === "anthropic" ? "Anthropic" : "Bedrock", `kind ${k.kind}`)} <span class="mono">…${esc(k.last4)}</span>${k.kind === "bedrock" ? ` · ${esc(k.region || "gateway region")} · ${esc(k.api || "policy API")}` : ""}${k.source === "env" ? " · env" : ""}</small></div></td>
+        <td><div class="key-id"><b>${esc(k.label)}</b><small>${chip(k.kind === "anthropic" ? "Anthropic" : "Bedrock", `kind ${k.kind}`)}${(k.teams || []).map((t) => chip(t, "soft")).join("")} <span class="mono">…${esc(k.last4)}</span>${k.kind === "bedrock" ? ` · ${esc(k.region || "gateway region")} · ${esc(k.api || "policy API")}` : ""}${k.source === "env" ? " · env" : ""}</small></div></td>
         <td>${pill(label, tone)}${k.cooldownSec ? ` <span class="muted small">${fmtSec(k.cooldownSec)}</span>` : ""}<small class="block muted" title="${esc(k.lastError || "")}">${esc(reasonText(k.reason))}${k.lastUsedAt ? `${k.reason ? " · " : ""}used ${fmtAgo(k.lastUsedAt)}` : ""}</small></td>
         <td style="min-width:130px">${rate}</td>
         <td class="num">${fmtInt(k.today.requests)}${k.today.failovers ? `<small class="block muted">${k.today.failovers} failover${k.today.failovers > 1 ? "s" : ""}</small>` : ""}</td>
@@ -122,6 +124,13 @@ function openEditor(k) {
         <div class="row2"><label>Region <input name="region" placeholder="gateway region" value="${esc(k?.region || "")}"></label>
         <label>API <select name="api"><option value="">Policy default</option><option value="mantle" ${k?.api === "mantle" ? "selected" : ""}>Mantle (Messages API)</option><option value="runtime" ${k?.api === "runtime" ? "selected" : ""}>Runtime (InvokeModel)</option></select></label></div>
         <p class="muted small">Keys from different AWS accounts each bring their own Bedrock quota, so N accounts ≈ N× the tokens per minute.</p></section>
+      <section class="fs"><h3>Teams <span class="muted small">optional</span></h3>
+        <label>Reserved for teams <input name="teams" placeholder="all developers (shared key)" value="${esc((k?.teams || []).join(", "))}"></label>
+        <p class="muted small">Comma separated, matching the developer's team. A reserved key serves only those teams; they use it before shared keys and overflow to shared keys when it is busy. Handy to keep each team on its own organization or AWS account.</p></section>
+      <section class="fs"><h3>Provider quota per minute <span class="muted small">optional · recommended for Bedrock keys</span></h3>
+        <div class="row2"><label>Tokens per minute <input name="tpmLimit" type="number" min="0" step="10000" placeholder="unknown" value="${k?.tpmLimit || ""}"></label>
+        <label>Requests per minute <input name="rpmLimit" type="number" min="0" step="1" placeholder="unknown" value="${k?.rpmLimit || ""}"></label></div>
+        <p class="muted small">Bedrock sends no rate-limit headers. With your account's quota here, the gateway counts usage itself and moves new work elsewhere before throttling starts.</p></section>
       <section class="fs"><h3>Daily caps <span class="muted small">optional, UTC day; the key leaves the rotation when one is reached</span></h3>
         <div class="row2"><label>Tokens <input name="dailyTokenLimit" type="number" min="0" step="100000" placeholder="no cap" value="${k?.dailyTokenLimit || ""}"></label>
         <label>Budget (USD) <input name="dailyBudgetUsd" type="number" min="0" step="1" placeholder="no cap" value="${k?.dailyBudgetUsd || ""}"></label></div></section>
@@ -148,7 +157,7 @@ function openEditor(k) {
     e.preventDefault();
     const msg = $("#msg", el), save = $("#save", el);
     const num = (n) => (F(n).value === "" ? (isEdit ? 0 : undefined) : Number(F(n).value));
-    const body = { label: F("label").value.trim(), dailyTokenLimit: num("dailyTokenLimit"), dailyBudgetUsd: num("dailyBudgetUsd"), baseUrl: F("baseUrl").value.trim() };
+    const body = { label: F("label").value.trim(), dailyTokenLimit: num("dailyTokenLimit"), dailyBudgetUsd: num("dailyBudgetUsd"), tpmLimit: num("tpmLimit"), rpmLimit: num("rpmLimit"), teams: F("teams").value.split(",").map((x) => x.trim()).filter(Boolean), baseUrl: F("baseUrl").value.trim() };
     if (F("priority").value !== "") body.priority = Number(F("priority").value);
     if (F("secret").value.trim()) body.secret = F("secret").value.trim();
     const kindVal = isEdit ? k.kind : form.elements.kind.value;

@@ -44,9 +44,27 @@ export interface StoredKey {
   /** Optional self-imposed caps per UTC day. 0 / undefined = none. */
   dailyTokenLimit?: number;
   dailyBudgetUsd?: number;
+  /** Developer teams this key is reserved for. Empty / undefined = shared by everyone. */
+  teams?: string[];
+  /** Provider quota per minute, tracked locally (Bedrock sends no rate-limit headers). The key is parked near it. */
+  tpmLimit?: number;
+  rpmLimit?: number;
   createdAt: string;
   source?: "store" | "env";
 }
+
+/** Cooldown state shared between gateway tasks (and kept across restarts) through the store. */
+export interface SharedKeyState {
+  cooldownUntil: number;
+  soft: boolean;
+  reason?: string;
+  updatedAt: number;
+}
+
+/** Things worth telling a human about (alerts). */
+export type PoolEvent =
+  | { type: "key.down"; id: string; label: string; kind: ProviderKind; reason: string; status?: number; error?: string; cooldownMs: number; failures: number }
+  | { type: "key.recovered"; id: string; label: string; kind: ProviderKind; downReason: string };
 
 export interface PoolSettings {
   strategy: PoolStrategy;
@@ -61,6 +79,8 @@ export interface PoolSettings {
 export interface PoolDoc {
   settings: PoolSettings;
   keys: StoredKey[];
+  /** KMS-encrypted data key (base64) when KEY_POOL_KMS_KEY_ID is used. */
+  dataKey?: string;
   updatedAt?: string;
 }
 
@@ -90,6 +110,13 @@ interface KeyState {
   costUsd: number;
   failovers: number;
   rate?: RateSnapshot;
+  /** Set when a key.down event was emitted; cleared (with key.recovered) on the next success. */
+  downReason?: string;
+  /** When cooldown/soft/reason last changed (merging shared state: newest wins). */
+  stateAt: number;
+  /** Sliding 60 s windows for local TPM / RPM tracking. */
+  reqWin: number[];
+  tokWin: Array<{ t: number; n: number }>;
 }
 
 /** What the dispatcher needs to call one key. `secret` is undefined for the env credential. */
@@ -123,6 +150,9 @@ export interface KeyView {
   baseUrl?: string;
   dailyTokenLimit?: number;
   dailyBudgetUsd?: number;
+  teams?: string[];
+  tpmLimit?: number;
+  rpmLimit?: number;
   createdAt: string;
   source: "store" | "env";
   status: "active" | "cooling" | "parked" | "capped" | "disabled" | "error";
@@ -144,8 +174,10 @@ export const fingerprint = (secret: string) => createHash("sha256").update(secre
 
 export class SecretBox {
   private readonly key: Buffer | null;
-  constructor(secret: string | undefined) {
-    this.key = secret ? createHash("sha256").update(`tokener-keypool:${secret}`).digest() : null;
+  /** @param rawKey 32-byte data key (KMS envelope mode); otherwise the key is derived from `secret`. */
+  constructor(secret: string | undefined, rawKey?: Buffer, readonly mode: "secret" | "kms" = rawKey ? "kms" : "secret") {
+    if (rawKey && rawKey.length !== 32) throw new Error("data key must be 32 bytes");
+    this.key = rawKey ?? (secret ? createHash("sha256").update(`tokener-keypool:${secret}`).digest() : null);
   }
   get available(): boolean {
     return this.key !== null;
@@ -248,13 +280,26 @@ export class KeyPool {
   private readonly sticky = new Map<string, { id: string; at: number }>();
   private readonly secrets = new Map<string, { v: string; plain?: string; error?: string }>();
   private rr = 0;
+  /** Alert hook. */
+  onEvent?: (e: PoolEvent) => void;
+  /** Persist / share a key's cooldown state. */
+  onState?: (id: string, st: SharedKeyState) => void;
 
   constructor(
-    private readonly box: SecretBox,
+    private box: SecretBox,
     /** Whether the gateway has its own AWS credentials to fall back on. */
     private readonly envCredential: { label: string } | null,
     private readonly now: () => number = Date.now,
+    /**
+     * distributed: several gateway tasks serve the same sessions (no sticky load balancer). New sessions are
+     * then assigned by rendezvous hashing, so every task puts a given session on the same key.
+     */
+    private readonly opts: { distributed?: boolean } = {},
   ) {}
+
+  get encryption(): "secret" | "kms" | "none" {
+    return this.box.available ? this.box.mode : "none";
+  }
 
   get settings(): PoolSettings {
     return this.doc.settings;
@@ -265,7 +310,14 @@ export class KeyPool {
 
   /** Replace the stored document (startup, admin save, periodic reload on multi-task deployments). */
   load(doc: PoolDoc | null): void {
-    this.doc = { settings: { ...DEFAULT_POOL_SETTINGS, ...(doc?.settings ?? {}) }, keys: (doc?.keys ?? []).map((k) => ({ ...k, source: "store" as const })), updatedAt: doc?.updatedAt };
+    this.doc = { settings: { ...DEFAULT_POOL_SETTINGS, ...(doc?.settings ?? {}) }, keys: (doc?.keys ?? []).map((k) => ({ ...k, source: "store" as const })), dataKey: doc?.dataKey, updatedAt: doc?.updatedAt };
+  }
+
+  get dataKey(): string | undefined {
+    return this.doc.dataKey;
+  }
+  set dataKey(v: string | undefined) {
+    this.doc.dataKey = v;
   }
 
   /** Read-only keys from PROVIDER_KEYS_JSON: [{"label":"a","kind":"anthropic","key":"sk-ant-..."}]. */
@@ -291,6 +343,9 @@ export class KeyPool {
         baseUrl: typeof o.baseUrl === "string" ? o.baseUrl : undefined,
         dailyTokenLimit: Number(o.dailyTokenLimit ?? 0) || undefined,
         dailyBudgetUsd: Number(o.dailyBudgetUsd ?? 0) || undefined,
+        teams: Array.isArray(o.teams) && o.teams.length ? (o.teams as unknown[]).map(String) : undefined,
+        tpmLimit: Number(o.tpmLimit ?? 0) || undefined,
+        rpmLimit: Number(o.rpmLimit ?? 0) || undefined,
         createdAt: new Date(0).toISOString(),
         source: "env" as const,
       };
@@ -299,7 +354,7 @@ export class KeyPool {
 
   /** Persistable copy (store keys only; env keys never get written). */
   toDoc(): PoolDoc {
-    return { settings: { ...this.doc.settings }, keys: this.doc.keys.map(({ source: _s, ...k }) => k), updatedAt: this.doc.updatedAt };
+    return { settings: { ...this.doc.settings }, keys: this.doc.keys.map(({ source: _s, ...k }) => k), dataKey: this.doc.dataKey, updatedAt: this.doc.updatedAt };
   }
 
   allKeys(): StoredKey[] {
@@ -315,7 +370,7 @@ export class KeyPool {
     let s = this.state.get(id);
     const d = today();
     if (!s) {
-      s = { cooldownUntil: 0, soft: false, failures: 0, day: d, requests: 0, tokens: 0, costUsd: 0, failovers: 0 };
+      s = { cooldownUntil: 0, soft: false, failures: 0, day: d, requests: 0, tokens: 0, costUsd: 0, failovers: 0, stateAt: 0, reqWin: [], tokWin: [] };
       this.state.set(id, s);
     }
     if (s.day !== d) Object.assign(s, { day: d, requests: 0, tokens: 0, costUsd: 0, failovers: 0 });
@@ -348,7 +403,29 @@ export class KeyPool {
     if (this.secretOf(k).error) return Infinity;
     if (this.capped(k, s)) return Infinity;
     if (s.cooldownUntil > this.now()) return s.soft ? 1 : Infinity;
+    if (this.localPressure(k, s)) return 1;
     return 0;
+  }
+
+  /** "rpm" | "tpm" when the key is within softLimitPct of its configured per-minute quota. */
+  private localPressure(k: StoredKey, s: KeyState): "rpm" | "tpm" | undefined {
+    if (!k.rpmLimit && !k.tpmLimit) return undefined;
+    const now = this.now();
+    this.pruneWindows(s, now);
+    const threshold = 1 - this.doc.settings.softLimitPct / 100;
+    if (k.rpmLimit && s.reqWin.length >= k.rpmLimit * threshold) return "rpm";
+    if (k.tpmLimit && s.tokWin.reduce((a, x) => a + x.n, 0) >= k.tpmLimit * threshold) return "tpm";
+    return undefined;
+  }
+
+  private pruneWindows(s: KeyState, now: number): void {
+    const cutoff = now - 60_000;
+    while (s.reqWin.length && s.reqWin[0] < cutoff) s.reqWin.shift();
+    while (s.tokWin.length && s.tokWin[0].t < cutoff) s.tokWin.shift();
+  }
+
+  private teamAllows(k: StoredKey, team: string | undefined): boolean {
+    return !k.teams?.length || (!!team && k.teams.includes(team));
   }
 
   private toSelected(k: StoredKey): Selected {
@@ -363,10 +440,14 @@ export class KeyPool {
    * Pick the key for the next attempt. Returns null when nothing is usable; `retryInMs` then says when the
    * first cooled-down key comes back so the gateway can answer with an honest retry-after.
    */
-  select(ctx: { sessionKey?: string; model: string; exclude: Set<string> }): Selected | null {
+  select(ctx: { sessionKey?: string; model: string; exclude: Set<string>; team?: string }): Selected | null {
     const keys = this.allKeys();
     if (!keys.length) return ctx.exclude.has(ENV_KEY_ID) ? null : this.envSelected();
-    const ranked = keys.filter((k) => !ctx.exclude.has(k.id)).map((k) => ({ k, t: this.tier(k, ctx.model) })).filter((x) => x.t !== Infinity);
+    // Keys reserved for the developer's team come before shared keys (same health tier).
+    const ranked = keys
+      .filter((k) => !ctx.exclude.has(k.id) && this.teamAllows(k, ctx.team))
+      .map((k) => ({ k, t: this.tier(k, ctx.model) + (ctx.team && !k.teams?.length ? 0.5 : 0) }))
+      .filter((x) => x.t !== Infinity);
     const bestTier = Math.min(...ranked.map((x) => x.t));
     const pool = ranked.filter((x) => x.t === bestTier).map((x) => x.k).sort((a, b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
     if (!pool.length) {
@@ -380,10 +461,11 @@ export class KeyPool {
     else if (strategy === "session" && ctx.sessionKey) {
       const stuck = this.sticky.get(ctx.sessionKey);
       const still = stuck && pool.find((k) => k.id === stuck.id);
-      pick = still ?? this.leastSticky(pool);
+      pick = still ?? (this.opts.distributed ? rendezvous(pool, ctx.sessionKey) : this.leastSticky(pool));
       this.sticky.set(ctx.sessionKey, { id: pick.id, at: this.now() });
       this.pruneSticky();
     } else pick = pool[this.rr++ % pool.length];
+    if (pick.rpmLimit) this.st(pick.id).reqWin.push(this.now());
     return this.toSelected(pick);
   }
 
@@ -417,12 +499,15 @@ export class KeyPool {
     if (id === ENV_KEY_ID) return;
     const s = this.st(id);
     const now = this.now();
+    const before = { cooldownUntil: s.cooldownUntil, soft: s.soft, reason: s.reason };
     s.lastUsedAt = now;
     s.lastOkAt = now;
     s.lastStatus = 200;
     s.failures = 0;
-    if (!s.soft) s.cooldownUntil = 0;
-    s.reason = undefined;
+    if (!s.soft) {
+      s.cooldownUntil = 0;
+      s.reason = undefined;
+    }
     const rate = headers ? rateFromHeaders(headers, now) : undefined;
     if (rate) {
       s.rate = rate;
@@ -434,7 +519,33 @@ export class KeyPool {
       } else if (s.soft) {
         s.soft = false;
         s.cooldownUntil = 0;
+        s.reason = undefined;
       }
+    }
+    if (s.downReason) {
+      const k = this.find(id);
+      if (k) this.onEvent?.({ type: "key.recovered", id, label: k.label, kind: k.kind, downReason: s.downReason });
+      s.downReason = undefined;
+    }
+    if (before.cooldownUntil !== s.cooldownUntil || before.soft !== s.soft || before.reason !== s.reason) this.shareState(id, s);
+  }
+
+  private find(id: string): StoredKey | undefined {
+    return this.allKeys().find((k) => k.id === id);
+  }
+
+  private shareState(id: string, s: KeyState): void {
+    s.stateAt = this.now();
+    this.onState?.(id, { cooldownUntil: s.cooldownUntil, soft: s.soft, reason: s.reason, updatedAt: s.stateAt });
+  }
+
+  /** Merge cooldowns written by other tasks (or by this task before a restart); the newest change wins. */
+  applyShared(states: Record<string, SharedKeyState>): void {
+    for (const [id, x] of Object.entries(states)) {
+      if (!this.find(id)) continue;
+      const s = this.st(id);
+      if (x.updatedAt <= s.stateAt) continue;
+      Object.assign(s, { cooldownUntil: x.cooldownUntil, soft: x.soft, reason: x.reason, stateAt: x.updatedAt });
     }
   }
 
@@ -450,9 +561,18 @@ export class KeyPool {
       s.failovers++;
       // Repeated hard failures back off further (capped at 1 h) so a dead key stops costing a round trip.
       const factor = v.reason === "rate_limited" || v.reason === "credit_exhausted" ? 1 : Math.min(8, 2 ** Math.max(0, s.failures - 1));
-      s.cooldownUntil = now + Math.min(60 * 60_000, v.cooldownMs * factor);
+      const cooldownMs = Math.min(60 * 60_000, v.cooldownMs * factor);
+      s.cooldownUntil = now + cooldownMs;
       s.soft = false;
       s.reason = v.reason;
+      this.shareState(id, s);
+      // Alert on failures a human has to fix (bad key, no credit, no access), or on a key that keeps failing.
+      const serious = v.reason === "auth_failed" || v.reason === "forbidden" || v.reason === "credit_exhausted";
+      if ((serious || s.failures >= 3) && !s.downReason) {
+        const k = this.find(id);
+        s.downReason = v.reason;
+        if (k) this.onEvent?.({ type: "key.down", id, label: k.label, kind: k.kind, reason: v.reason, status: v.status, error: v.error?.slice(0, 200), cooldownMs, failures: s.failures });
+      }
     }
   }
 
@@ -462,6 +582,7 @@ export class KeyPool {
     s.requests++;
     s.tokens += tokens;
     s.costUsd += costUsd;
+    if (tokens > 0) s.tokWin.push({ t: this.now(), n: tokens });
   }
 
   /** Seed today's counters from the store after a restart (or refresh them on multi-task deployments). */
@@ -474,12 +595,43 @@ export class KeyPool {
 
   resetCooldown(id: string): void {
     const s = this.st(id);
-    Object.assign(s, { cooldownUntil: 0, soft: false, failures: 0, reason: undefined });
+    Object.assign(s, { cooldownUntil: 0, soft: false, failures: 0, reason: undefined, downReason: undefined });
+    if (this.find(id)) this.shareState(id, s);
+  }
+
+  /** Re-encrypt every stored key with a new box (switching to KMS, rotating KEY_POOL_SECRET). Returns how many moved. */
+  rekey(next: SecretBox): number {
+    let n = 0;
+    for (const k of this.doc.keys) {
+      if (k.secretEnc.startsWith("plain:")) continue;
+      const sec = this.secretOf(k);
+      if (sec.plain === undefined) continue;
+      k.secretEnc = next.seal(sec.plain);
+      this.secrets.delete(k.id);
+      n++;
+    }
+    this.box = next;
+    this.secrets.clear();
+    if (n) this.doc.updatedAt = new Date(this.now()).toISOString();
+    return n;
+  }
+
+  /** True when a stored key cannot be opened with the current box but could be with `other`. */
+  canOpenWith(other: SecretBox): boolean {
+    return this.doc.keys.some((k) => {
+      if (k.secretEnc.startsWith("plain:")) return false;
+      try {
+        other.open(k.secretEnc);
+        return true;
+      } catch {
+        return false;
+      }
+    });
   }
 
   /* -------- admin mutations (callers persist toDoc() afterwards) -------- */
 
-  addKey(input: { label: string; kind: ProviderKind; secret: string; priority?: number; region?: string; api?: "mantle" | "runtime"; baseUrl?: string; dailyTokenLimit?: number; dailyBudgetUsd?: number }): StoredKey {
+  addKey(input: { label: string; kind: ProviderKind; secret: string; priority?: number; region?: string; api?: "mantle" | "runtime"; baseUrl?: string; dailyTokenLimit?: number; dailyBudgetUsd?: number; teams?: string[]; tpmLimit?: number; rpmLimit?: number }): StoredKey {
     const id = `k_${randomBytes(4).toString("hex")}`;
     const k: StoredKey = {
       id,
@@ -495,6 +647,9 @@ export class KeyPool {
       baseUrl: input.baseUrl || undefined,
       dailyTokenLimit: input.dailyTokenLimit || undefined,
       dailyBudgetUsd: input.dailyBudgetUsd || undefined,
+      teams: input.teams?.length ? input.teams : undefined,
+      tpmLimit: input.tpmLimit || undefined,
+      rpmLimit: input.rpmLimit || undefined,
       createdAt: new Date(this.now()).toISOString(),
       source: "store",
     };
@@ -503,13 +658,14 @@ export class KeyPool {
     return k;
   }
 
-  updateKey(id: string, patch: Partial<Pick<StoredKey, "label" | "enabled" | "priority" | "region" | "api" | "baseUrl" | "dailyTokenLimit" | "dailyBudgetUsd">> & { secret?: string }): StoredKey | null {
+  updateKey(id: string, patch: Partial<Pick<StoredKey, "label" | "enabled" | "priority" | "region" | "api" | "baseUrl" | "dailyTokenLimit" | "dailyBudgetUsd" | "teams" | "tpmLimit" | "rpmLimit">> & { secret?: string }): StoredKey | null {
     const k = this.doc.keys.find((x) => x.id === id);
     if (!k) return null;
     const { secret, ...rest } = patch;
     for (const [f, v] of Object.entries(rest)) {
       if (v === undefined) continue;
-      (k as unknown as Record<string, unknown>)[f] = v === "" || v === null || v === 0 ? (f === "enabled" || f === "priority" ? v : undefined) : v;
+      const empty = v === "" || v === null || v === 0 || (Array.isArray(v) && !v.length);
+      (k as unknown as Record<string, unknown>)[f] = empty ? (f === "enabled" || f === "priority" ? v : undefined) : v;
     }
     if (secret) {
       k.secretEnc = this.box.seal(secret);
@@ -549,7 +705,18 @@ export class KeyPool {
     return this.toSelected(k);
   }
 
-  view(): { settings: PoolSettings; keys: KeyView[]; envCredential: string | null; canStoreSecrets: boolean; summary: { total: number; available: number } } {
+  /** Remaining share of the local per-minute quota, in the same shape as the header snapshot. */
+  private localRate(k: StoredKey, s: KeyState): KeyView["rate"] {
+    if (!k.rpmLimit && !k.tpmLimit) return undefined;
+    this.pruneWindows(s, this.now());
+    const parts: Array<[string, number]> = [];
+    if (k.rpmLimit) parts.push(["rpm (local)", 1 - s.reqWin.length / k.rpmLimit]);
+    if (k.tpmLimit) parts.push(["tpm (local)", 1 - s.tokWin.reduce((a, x) => a + x.n, 0) / k.tpmLimit]);
+    const [bucket, pct] = parts.sort((a, b) => a[1] - b[1])[0];
+    return { minRemainingPct: Math.round(Math.max(0, pct) * 1000) / 10, bucket, at: new Date(this.now()).toISOString() };
+  }
+
+  view(): { settings: PoolSettings; keys: KeyView[]; envCredential: string | null; canStoreSecrets: boolean; encryption: "secret" | "kms" | "none"; summary: { total: number; available: number } } {
     const now = this.now();
     const live = new Map<string, number>();
     const cutoff = now - 60 * 60_000;
@@ -560,7 +727,9 @@ export class KeyPool {
         const s = this.st(k.id);
         const sec = this.secretOf(k);
         const cooling = s.cooldownUntil > now;
-        const status: KeyView["status"] = !k.enabled ? "disabled" : sec.error ? "error" : this.capped(k, s) ? "capped" : cooling ? (s.soft ? "parked" : "cooling") : "active";
+        const pressure = this.localPressure(k, s);
+        const status: KeyView["status"] = !k.enabled ? "disabled" : sec.error ? "error" : this.capped(k, s) ? "capped" : cooling ? (s.soft ? "parked" : "cooling") : pressure ? "parked" : "active";
+        const local = this.localRate(k, s);
         return {
           id: k.id,
           label: k.label,
@@ -573,17 +742,20 @@ export class KeyPool {
           baseUrl: k.baseUrl,
           dailyTokenLimit: k.dailyTokenLimit,
           dailyBudgetUsd: k.dailyBudgetUsd,
+          teams: k.teams,
+          tpmLimit: k.tpmLimit,
+          rpmLimit: k.rpmLimit,
           createdAt: k.createdAt,
           source: k.source ?? "store",
           status,
-          reason: sec.error ? "decrypt_failed" : s.reason,
+          reason: sec.error ? "decrypt_failed" : s.reason ?? (pressure ? `near_limit:${pressure}` : undefined),
           cooldownSec: cooling ? Math.ceil((s.cooldownUntil - now) / 1000) : 0,
           lastStatus: s.lastStatus,
           lastError: sec.error ?? s.lastError,
           lastUsedAt: s.lastUsedAt ? new Date(s.lastUsedAt).toISOString() : undefined,
           lastOkAt: s.lastOkAt ? new Date(s.lastOkAt).toISOString() : undefined,
           today: { requests: s.requests, tokens: s.tokens, costUsd: Math.round(s.costUsd * 1e6) / 1e6, failovers: s.failovers },
-          rate: s.rate ? { minRemainingPct: Math.round(s.rate.minRemainingPct * 1000) / 10, bucket: s.rate.bucket, resetAt: s.rate.resetAt ? new Date(s.rate.resetAt).toISOString() : undefined, at: new Date(s.rate.at).toISOString() } : undefined,
+          rate: !s.rate && local ? local : s.rate ? { minRemainingPct: Math.round(s.rate.minRemainingPct * 1000) / 10, bucket: s.rate.bucket, resetAt: s.rate.resetAt ? new Date(s.rate.resetAt).toISOString() : undefined, at: new Date(s.rate.at).toISOString() } : undefined,
           activeSessions: live.get(k.id) ?? 0,
         };
       });
@@ -592,6 +764,7 @@ export class KeyPool {
       keys,
       envCredential: this.envCredential?.label ?? null,
       canStoreSecrets: this.box.available,
+      encryption: this.encryption,
       summary: { total: keys.length, available: keys.filter((k) => k.status === "active" || k.status === "parked").length },
     };
   }
@@ -619,4 +792,18 @@ export function validateSettings(o: Record<string, unknown>): { ok: true; value:
     out.maxAttempts = n;
   }
   return { ok: true, value: out };
+}
+
+/** Highest-random-weight hashing: stable session -> key mapping that every gateway task computes identically. */
+export function rendezvous<T extends { id: string }>(pool: T[], sessionKey: string): T {
+  let best = pool[0];
+  let bestScore = -1;
+  for (const k of pool) {
+    const score = createHash("sha256").update(`${sessionKey}|${k.id}`).digest().readUInt32BE(0);
+    if (score > bestScore) {
+      best = k;
+      bestScore = score;
+    }
+  }
+  return best;
 }

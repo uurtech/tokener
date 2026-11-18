@@ -7,11 +7,24 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, ScanCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import type { Policy } from "../policy-state.js";
-import type { PoolDoc } from "../keypool.js";
+import type { PoolDoc, SharedKeyState } from "../keypool.js";
 import { aggregate, dayKey, hitPct, lastDays, monthKey, ZERO_TOTALS, type AuditEvent, type AuditStore, type BreakdownRow, type DailyTotals, type DeveloperRecord, type KeyStore, type Overview, type PolicyStore, type PoolStore, type RequestRecord, type Store, type UsageStore } from "./types.js";
 
 const POLICY_KEY = "POLICY#v1";
 const POOL_KEY = "KEYPOOL#v1";
+
+function itemTotals(item: Record<string, unknown> | undefined): DailyTotals {
+  const it = (item ?? {}) as Record<string, number>;
+  return {
+    requests: it.requests ?? 0,
+    costUsd: (it.costMicros ?? 0) / 1_000_000,
+    savedUsd: (it.savedMicros ?? 0) / 1_000_000,
+    inputTokens: it.inputTokens ?? 0,
+    cacheReadTokens: it.cacheReadTokens ?? 0,
+    cacheWriteTokens: it.cacheWriteTokens ?? 0,
+    outputTokens: it.outputTokens ?? 0,
+  };
+}
 
 export class DynamoStore implements Store {
   readonly kind = "dynamo" as const;
@@ -37,6 +50,8 @@ export class DynamoStore implements Store {
       team: typeof item.team === "string" ? item.team : undefined,
       dailyBudgetUsd: typeof item.dailyBudgetUsd === "number" ? item.dailyBudgetUsd : undefined,
       dailyTokenLimit: typeof item.dailyTokenLimit === "number" ? item.dailyTokenLimit : undefined,
+      monthlyBudgetUsd: typeof item.monthlyBudgetUsd === "number" ? item.monthlyBudgetUsd : undefined,
+      monthlyTokenLimit: typeof item.monthlyTokenLimit === "number" ? item.monthlyTokenLimit : undefined,
       allowedModels: Array.isArray(item.allowedModels) && item.allowedModels.length ? (item.allowedModels as string[]) : undefined,
       upstreamMode: item.upstreamMode === "mantle" || item.upstreamMode === "runtime" ? item.upstreamMode : undefined,
       createdAt: typeof item.createdAt === "string" ? item.createdAt : undefined,
@@ -108,6 +123,14 @@ export class DynamoStore implements Store {
           sets.push("dailyTokenLimit = :tl");
           vals[":tl"] = patch.dailyTokenLimit;
         }
+        if (patch.monthlyBudgetUsd !== undefined) {
+          sets.push("monthlyBudgetUsd = :mb");
+          vals[":mb"] = patch.monthlyBudgetUsd;
+        }
+        if (patch.monthlyTokenLimit !== undefined) {
+          sets.push("monthlyTokenLimit = :mt");
+          vals[":mt"] = patch.monthlyTokenLimit;
+        }
         if (patch.team !== undefined) {
           sets.push("team = :tm");
           vals[":tm"] = patch.team;
@@ -173,8 +196,14 @@ export class DynamoStore implements Store {
             ),
           ),
         );
-        const c = budgetCache.get(r.developerId);
-        if (c) c.totals.costUsd += r.costUsd;
+        for (const ck of [r.developerId, `M#${r.developerId}`]) {
+          const c = budgetCache.get(ck);
+          if (c) {
+            c.totals.costUsd += r.costUsd;
+            c.totals.inputTokens += r.usage.inputTokens;
+            c.totals.outputTokens += r.usage.outputTokens;
+          }
+        }
       },
       async todayTotals(developerId) {
         const now = Date.now();
@@ -234,6 +263,20 @@ export class DynamoStore implements Store {
           ZERO_TOTALS(),
         );
         return { ...mem, byDeveloper, byModel, byKey: byKey.length ? byKey : mem.byKey, totals: { ...totals, cacheHitPct: hitPct(totals), developers: byDeveloper.length } } satisfies Overview;
+      },
+      async monthTotals(developerId) {
+        const ck = `M#${developerId}`;
+        const c = budgetCache.get(ck);
+        if (c && c.expires > Date.now()) return c.totals;
+        const res = await ddb.send(new GetCommand({ TableName: usageTable, Key: { pk: `DEV#${developerId}`, sk: `MONTH#${monthKey()}` } }));
+        const totals = itemTotals(res.Item);
+        budgetCache.set(ck, { totals, expires: Date.now() + 30_000 });
+        return totals;
+      },
+      async developerTrend(developerId, days) {
+        const keys = lastDays(days);
+        const items = await Promise.all(keys.map((d) => ddb.send(new GetCommand({ TableName: usageTable, Key: { pk: `DEV#${developerId}`, sk: `DAY#${d}` } })).then((r) => r.Item)));
+        return keys.map((day, i) => ({ day, ...itemTotals(items[i]), developers: items[i] ? 1 : 0 }));
       },
       async keyTotals(providerKey) {
         const res = await ddb.send(new GetCommand({ TableName: usageTable, Key: { pk: `KEY#${providerKey}`, sk: `DAY#${dayKey()}` } }));
@@ -312,6 +355,31 @@ export class DynamoStore implements Store {
       },
       async save(doc) {
         await ddb.send(new PutCommand({ TableName: keysTable, Item: { keyHash: POOL_KEY, poolJson: JSON.stringify(doc), updatedAt: new Date().toISOString() } }));
+      },
+      async saveState(id, st) {
+        // Conditional write: an older state from a slower task never overwrites a newer one.
+        await ddb
+          .send(
+            new PutCommand({
+              TableName: keysTable,
+              Item: { keyHash: `KEYSTATE#${id}`, keyId: id, ...st },
+              ConditionExpression: "attribute_not_exists(updatedAt) OR updatedAt < :u",
+              ExpressionAttributeValues: { ":u": st.updatedAt },
+            }),
+          )
+          .catch((e: Error) => {
+            if (e.name !== "ConditionalCheckFailedException") throw e;
+          });
+      },
+      async loadStates() {
+        const out: Record<string, SharedKeyState> = {};
+        let ExclusiveStartKey: Record<string, unknown> | undefined;
+        do {
+          const res = await ddb.send(new ScanCommand({ TableName: keysTable, FilterExpression: "begins_with(keyHash, :p)", ExpressionAttributeValues: { ":p": "KEYSTATE#" }, ExclusiveStartKey }));
+          for (const it of res.Items ?? []) out[it.keyId as string] = { cooldownUntil: Number(it.cooldownUntil), soft: it.soft === true, reason: it.reason as string | undefined, updatedAt: Number(it.updatedAt) };
+          ExclusiveStartKey = res.LastEvaluatedKey as Record<string, unknown> | undefined;
+        } while (ExclusiveStartKey);
+        return out;
       },
     };
   }

@@ -14,8 +14,12 @@
     <div class="brand big"><span class="logo">t</span><div><b>tokener</b><small>Claude Code → Amazon Bedrock gateway</small></div></div>
     <h1>Sign in to the admin console</h1>
     <p class="muted">Use the admin token from Secrets Manager (<code>AdminTokenCommand</code> stack output) or the <code>ADMIN_TOKEN</code> you started the gateway with.</p>
-    <label>Admin token <input id="tokenInput" type="password" placeholder="••••••••••••" autocomplete="current-password" required></label>
+    <a id="ssoBtn" class="btn-sso hidden" href="/admin/sso/login">Sign in with SSO</a>
+    <div id="tokenLogin">
+    <p id="ssoOr" class="muted small hidden" style="text-align:center">or use the admin token</p>
+    <label>Admin token <input id="tokenInput" type="password" placeholder="••••••••••••" autocomplete="current-password"></label>
     <button type="submit">Sign in</button>
+    </div>
     <p id="loginErr" class="err"></p>
     <p class="muted small">The token is kept in this browser only. Developers never use it; they get personal tokens from the Developers page.</p>
   </form>

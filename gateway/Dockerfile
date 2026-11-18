@@ -14,7 +14,8 @@ LABEL org.opencontainers.image.title="tokener" \
       org.opencontainers.image.description="Claude Code to Amazon Bedrock token-optimisation gateway" \
       org.opencontainers.image.vendor="archeon" \
       org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.licenses="Proprietary"
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.source="https://github.com/uurtech/tokener"
 # Keep the runtime image current with security patches at build time.
 RUN apk upgrade --no-cache
 ENV NODE_ENV=production PORT=8080

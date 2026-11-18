@@ -28,6 +28,7 @@
 <section>
   <div class="container docs-layout">
     <nav class="docs-nav" aria-label="Docs">
+      <a href="#deploy-server">Deploy in 5 minutes</a>
       <a href="#quick-start">Quick start</a>
       <a href="#developer-setup">Developer setup</a>
       <a href="#key-pool">Key pool</a>
@@ -37,6 +38,17 @@
       <a href="#limitations">Limitations</a>
     </nav>
     <div class="docs-body">
+      <h2 id="deploy-server">Deploy in 5 minutes</h2>
+      <p>On a fresh Linux server with a DNS record pointing at it (ports 80 and 443 open):</p>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/uurtech/tokener/master/deploy/install.sh \
+  | sudo bash -s -- claude-gw.example.com</code></pre>
+      <p>The script installs Docker if needed, writes <code>/opt/tokener/.env</code> with a random <code>ADMIN_TOKEN</code> and <code>KEY_POOL_SECRET</code>, starts tokener behind Caddy with automatic HTTPS, and prints the admin link. Use <code>:80</code> instead of a domain for a plain-HTTP trial. Update with <code>cd /opt/tokener &amp;&amp; docker compose pull &amp;&amp; docker compose up -d</code>.</p>
+      <p>Just the container:</p>
+      <pre><code>docker run -d -p 8080:8080 -v tokener:/app/data \
+  -e ADMIN_TOKEN=change-me -e KEY_POOL_SECRET=change-me-too \
+  -e STORE=sqlite -e SQLITE_PATH=/app/data/gateway.db ghcr.io/uurtech/tokener:latest</code></pre>
+      <p>Optional extras in <code>.env</code>: <code>ALERT_WEBHOOK_URL</code> (Slack, Discord, Teams), and admin SSO with <code>OIDC_ISSUER</code>, <code>OIDC_CLIENT_ID</code>, <code>OIDC_CLIENT_SECRET</code>, <code>OIDC_ALLOWED_DOMAINS</code> (callback <code>https://&lt;gateway&gt;/admin/sso/callback</code>).</p>
+
       <h2 id="quick-start">Quick start (local)</h2>
       <p>Nothing is deployed to AWS. You need Node 22.13+ and AWS credentials with access to the Anthropic models on Bedrock.</p>
       <pre><code>git clone https://github.com/uurtech/tokener.git &amp;&amp; cd tokener/gateway
@@ -72,7 +84,7 @@ npm run local</code></pre>
       <pre><code>KEY_POOL_SECRET=change-me   <span class="c-comment"># encrypts stored keys (defaults to ADMIN_TOKEN)</span>
 PROVIDER_KEYS_JSON='[{"label":"org-a","kind":"anthropic","key":"sk-ant-..."},
                      {"label":"acct-2","kind":"bedrock","key":"ABSK...","region":"us-west-2"}]'</code></pre>
-      <p>Each developer can check their own usage with <code>curl -H "Authorization: Bearer cgw_..." $GATEWAY/v1/me</code>.</p>
+      <p>Reserve keys for a team with the key's <b>Teams</b> field, and give Bedrock keys their tokens and requests per minute so the gateway can switch before throttling. Each developer can follow their own usage at <code>https://&lt;gateway&gt;/me</code>, or with <code>curl -H "Authorization: Bearer cgw_..." $GATEWAY/v1/me</code>.</p>
 
       <h2 id="deploy">Deploy to AWS</h2>
       <p>Requires AWS CLI v2, Node.js 22+, Docker and AWS CDK v2. A domain and ACM certificate are optional; without them the ALB serves HTTP, which is fine for a POC only.</p>

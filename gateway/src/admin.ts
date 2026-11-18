@@ -17,6 +17,8 @@ import { annotateCatalog, type ModelCatalog } from "./models.js";
 import { pricingTable, priceFor, priceKey } from "./pricing.js";
 import { validatePricing } from "./policy-state.js";
 import { fingerprint, validateSettings, type KeyPool, type ProviderKind } from "./keypool.js";
+import type { Alerter } from "./alerts.js";
+import { requestOrigin, type Oidc } from "./oidc.js";
 
 export interface AdminDeps {
   cfg: Config;
@@ -36,6 +38,10 @@ export interface AdminDeps {
   pool: KeyPool;
   savePool: () => Promise<void>;
   testKey: (id: string) => Promise<{ ok: boolean; ms: number; status?: number; detail: string }>;
+  alerter: Alerter;
+  oidc: Oidc | null;
+  /** Who is calling: "admin-token" or the SSO e-mail. Set per request. */
+  actor?: string;
 }
 
 const REGION_RE = /^[a-z]{2}(-[a-z]+)+-\d$/;
@@ -76,6 +82,12 @@ function keyInput(b: Record<string, unknown>, partial: boolean) {
     out.baseUrl = String(b.baseUrl).replace(/\/+$/, "");
   } else if (b.baseUrl === "" || b.baseUrl === null) out.baseUrl = "";
   for (const f of ["dailyTokenLimit", "dailyBudgetUsd"] as const) if (b[f] !== undefined && b[f] !== null && b[f] !== "") out[f] = nonNegative(b[f], f);
+  if (b.teams !== undefined) {
+    const raw = Array.isArray(b.teams) ? b.teams : typeof b.teams === "string" ? b.teams.split(",") : null;
+    if (!raw || raw.some((x) => typeof x !== "string")) throw new BadRequest("teams must be a list of team names");
+    out.teams = [...new Set((raw as string[]).map((x) => x.trim()).filter(Boolean))];
+  }
+  for (const f of ["tpmLimit", "rpmLimit"] as const) if (b[f] !== undefined && b[f] !== null && b[f] !== "") out[f] = nonNegative(b[f], f);
   if (b.priority !== undefined && b.priority !== null && b.priority !== "") {
     const n = Number(b.priority);
     if (!Number.isInteger(n) || n < 0 || n > 100000) throw new BadRequest("priority must be an integer 0-100000");
@@ -118,7 +130,7 @@ function modeOverride(v: unknown): "mantle" | "runtime" | null {
 
 async function audit(d: AdminDeps, action: string, target: string | undefined, details?: Record<string, unknown>): Promise<void> {
   try {
-    await d.store.audit.record({ ts: new Date().toISOString(), action, target, details });
+    await d.store.audit.record({ ts: new Date().toISOString(), action, target, details: d.actor ? { ...(details ?? {}), actor: d.actor } : details });
   } catch {
     /* audit must never fail the request */
   }
@@ -148,7 +160,8 @@ async function body(req: http.IncomingMessage): Promise<unknown> {
   }
 }
 
-function authed(req: http.IncomingMessage, token: string): boolean {
+function tokenAuthed(req: http.IncomingMessage, token: string): boolean {
+  if (!token) return false;
   const h = req.headers["authorization"];
   const m = typeof h === "string" ? /^Bearer\s+(.+)$/i.exec(h) : null;
   if (!m) return false;
@@ -157,9 +170,81 @@ function authed(req: http.IncomingMessage, token: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/**
+ * Admin token (Authorization: Bearer) or SSO session cookie. Cookie-authenticated writes must carry
+ * `X-Requested-With: tokener`: a cross-site form or image cannot set that header, so CSRF is blocked
+ * without tokens or CORS.
+ */
+function whoIs(req: http.IncomingMessage, d: AdminDeps): { actor: string; via: "token" | "sso"; email?: string } | { error: string } | null {
+  if (tokenAuthed(req, d.adminToken)) return { actor: "admin-token", via: "token" };
+  const s = d.oidc?.session(req.headers.cookie);
+  if (!s) return null;
+  if (req.method !== "GET" && req.method !== "HEAD" && req.headers["x-requested-with"] !== "tokener") return { error: "missing X-Requested-With header" };
+  return { actor: s.email, via: "sso", email: s.email };
+}
+
+const sendHtml = (res: http.ServerResponse, status: number, html: string, headers: Record<string, string | string[]> = {}) => {
+  res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...headers });
+  res.end(html);
+};
+
+/** Static files of the developer self-service page (/me). */
+export function serveMePage(res: http.ServerResponse, pathname: string): void {
+  if (pathname === "/me") {
+    res.writeHead(302, { location: "/me/" });
+    res.end();
+    return;
+  }
+  const rel = pathname === "/me/" ? "index.html" : pathname.slice("/me/".length);
+  const dir = path.join(UI_DIR, "me");
+  const file = path.normalize(path.join(dir, rel));
+  if (!file.startsWith(dir + path.sep) || !existsSync(file)) {
+    json(res, 404, { error: "not found" });
+    return;
+  }
+  const data = readFileSync(file);
+  res.writeHead(200, { "content-type": MIME[path.extname(file)] ?? "application/octet-stream", "cache-control": "no-cache", "content-length": data.length });
+  res.end(data);
+}
+
 /** Returns true if the request was handled. */
 export async function handleAdmin(req: http.IncomingMessage, res: http.ServerResponse, pathname: string, query: URLSearchParams, d: AdminDeps): Promise<boolean> {
   if (!pathname.startsWith("/admin")) return false;
+
+  // ---- single sign-on (OIDC) ----
+  if (pathname.startsWith("/admin/sso/")) {
+    const origin = requestOrigin(req.headers);
+    if (!d.oidc) return json(res, 404, { error: "SSO is not configured" }), true;
+    try {
+      if (pathname === "/admin/sso/login") {
+        const r = await d.oidc.loginRedirect(origin);
+        res.writeHead(302, { location: r.location, "set-cookie": r.cookie, "cache-control": "no-store" });
+        res.end();
+        return true;
+      }
+      if (pathname === "/admin/sso/callback") {
+        const r = await d.oidc.callback(query, req.headers.cookie, origin);
+        if (!r.ok) {
+          await audit({ ...d, actor: undefined }, "admin.sso.denied", undefined, { error: r.error });
+          sendHtml(res, 403, `<!doctype html><meta charset="utf-8"><title>tokener · sign-in failed</title><body style="font-family:system-ui;max-width:560px;margin:80px auto;padding:0 16px"><h1>Sign-in failed</h1><p>${r.error.replace(/[<>&"]/g, "")}</p><p><a href="/admin/">Back to the console</a></p>`);
+          return true;
+        }
+        await audit({ ...d, actor: r.session.email }, "admin.sso.login", r.session.email);
+        res.writeHead(302, { location: "/admin/", "set-cookie": r.cookies, "cache-control": "no-store" });
+        res.end();
+        return true;
+      }
+      if (pathname === "/admin/sso/logout") {
+        res.writeHead(302, { location: "/admin/", "set-cookie": d.oidc.logoutCookie(origin.startsWith("https:")), "cache-control": "no-store" });
+        res.end();
+        return true;
+      }
+    } catch (e) {
+      return json(res, 502, { error: `SSO error: ${(e as Error).message}` }), true;
+    }
+    return json(res, 404, { error: "not found" }), true;
+  }
+  if (pathname === "/admin/api/auth-config") return json(res, 200, { sso: !!d.oidc, ssoLabel: d.oidc?.cfg.label ?? null, tokenLogin: !!d.adminToken }), true;
 
   // Static UI (no auth: it only contains the login form and client code)
   if (!pathname.startsWith("/admin/api")) {
@@ -175,16 +260,30 @@ export async function handleAdmin(req: http.IncomingMessage, res: http.ServerRes
     return true;
   }
 
-  if (!authed(req, d.adminToken)) {
-    json(res, 401, { error: "admin token required" });
+  const who = whoIs(req, d);
+  if (!who) {
+    json(res, 401, { error: "admin token or SSO session required" });
     return true;
   }
+  if ("error" in who) {
+    json(res, 403, { error: who.error });
+    return true;
+  }
+  d = { ...d, actor: who.actor };
 
   const route = `${req.method} ${pathname.slice("/admin/api".length)}`;
   try {
     switch (true) {
       case route === "GET /me":
-        return json(res, 200, { ok: true }), true;
+        return json(res, 200, { ok: true, via: who.via, email: who.email ?? null }), true;
+
+      case route === "GET /alerts":
+        return json(res, 200, { webhookConfigured: !!d.getPolicy().alertWebhookUrl, history: d.alerter.history() }), true;
+
+      case route === "POST /alerts/test": {
+        const r = await d.alerter.deliver({ kind: "test", severity: "info", title: "Test alert from the admin console", detail: "If you can read this, tokener alerts reach this channel.", fields: { by: who.actor } });
+        return json(res, r.delivered ? 200 : 400, r), true;
+      }
 
       case route === "GET /config":
         return (
@@ -201,6 +300,8 @@ export async function handleAdmin(req: http.IncomingMessage, res: http.ServerRes
             version: d.version,
             node: process.version,
             authMode: d.authMode,
+            keyEncryption: d.pool.encryption,
+            sso: d.oidc ? { issuer: d.oidc.cfg.issuer, label: d.oidc.cfg.label, domains: d.oidc.cfg.allowedDomains, emails: d.oidc.cfg.allowedEmails.length } : null,
             marketplace: d.marketplace(),
             catalog: (() => {
               const c = d.catalog.peek();
@@ -263,19 +364,19 @@ export async function handleAdmin(req: http.IncomingMessage, res: http.ServerRes
 
       case route === "GET /developers": {
         const list = await d.store.keys.list();
-        const today = await Promise.all(list.map((x) => d.store.usage.todayTotals(x.developerId)));
+        const [today, month] = await Promise.all([Promise.all(list.map((x) => d.store.usage.todayTotals(x.developerId))), Promise.all(list.map((x) => d.store.usage.monthTotals(x.developerId)))]);
         return (
           json(
             res,
             200,
-            list.map((x, i) => ({ ...x, keyHash: x.keyHash.slice(0, 12), todayCostUsd: today[i].costUsd, todayRequests: today[i].requests, todayTokens: totalTokens(today[i]) })),
+            list.map((x, i) => ({ ...x, keyHash: x.keyHash.slice(0, 12), todayCostUsd: today[i].costUsd, todayRequests: today[i].requests, todayTokens: totalTokens(today[i]), monthCostUsd: month[i].costUsd, monthTokens: totalTokens(month[i]) })),
           ),
           true
         );
       }
 
       case route === "POST /developers": {
-        const b = (await body(req)) as { developerId?: string; team?: string; dailyBudgetUsd?: number; dailyTokenLimit?: number; allowedModels?: unknown; upstreamMode?: unknown };
+        const b = (await body(req)) as { developerId?: string; team?: string; dailyBudgetUsd?: number; dailyTokenLimit?: number; monthlyBudgetUsd?: number; monthlyTokenLimit?: number; allowedModels?: unknown; upstreamMode?: unknown };
         const id = (b.developerId ?? "").trim();
         if (!/^[a-zA-Z0-9._@-]{2,64}$/.test(id)) return json(res, 400, { error: "developerId: 2-64 chars, letters/digits/._@-" }), true;
         const budget = b.dailyBudgetUsd === undefined ? d.getPolicy().defaultDailyBudgetUsd : nonNegative(b.dailyBudgetUsd, "dailyBudgetUsd");
@@ -288,6 +389,8 @@ export async function handleAdmin(req: http.IncomingMessage, res: http.ServerRes
           team: (b.team ?? "").trim() || undefined,
           dailyBudgetUsd: budget,
           dailyTokenLimit: tokens,
+          monthlyBudgetUsd: b.monthlyBudgetUsd === undefined ? undefined : nonNegative(b.monthlyBudgetUsd, "monthlyBudgetUsd"),
+          monthlyTokenLimit: b.monthlyTokenLimit === undefined ? undefined : nonNegative(b.monthlyTokenLimit, "monthlyTokenLimit"),
           allowedModels: modelList(b.allowedModels, "allowedModels"),
           upstreamMode: modeOverride(b.upstreamMode) ?? undefined,
           createdAt: new Date().toISOString(),
@@ -320,10 +423,12 @@ export async function handleAdmin(req: http.IncomingMessage, res: http.ServerRes
 
       case /^PATCH \/developers\/[^/]+$/.test(route): {
         const id = decodeURIComponent(pathname.split("/").pop()!);
-        const b = (await body(req)) as { dailyBudgetUsd?: number; dailyTokenLimit?: number; team?: string; allowedModels?: unknown; upstreamMode?: unknown };
+        const b = (await body(req)) as { dailyBudgetUsd?: number; dailyTokenLimit?: number; monthlyBudgetUsd?: number; monthlyTokenLimit?: number; team?: string; allowedModels?: unknown; upstreamMode?: unknown };
         const n = await d.store.keys.update(id, {
           dailyBudgetUsd: b.dailyBudgetUsd === undefined ? undefined : nonNegative(b.dailyBudgetUsd, "dailyBudgetUsd"),
           dailyTokenLimit: b.dailyTokenLimit === undefined ? undefined : nonNegative(b.dailyTokenLimit, "dailyTokenLimit"),
+          monthlyBudgetUsd: b.monthlyBudgetUsd === undefined ? undefined : nonNegative(b.monthlyBudgetUsd, "monthlyBudgetUsd"),
+          monthlyTokenLimit: b.monthlyTokenLimit === undefined ? undefined : nonNegative(b.monthlyTokenLimit, "monthlyTokenLimit"),
           team: typeof b.team === "string" ? b.team.trim() : undefined,
           allowedModels: "allowedModels" in b ? modelList(b.allowedModels, "allowedModels") : undefined,
           upstreamMode: "upstreamMode" in b ? modeOverride(b.upstreamMode) : undefined,
@@ -377,7 +482,7 @@ export async function handleAdmin(req: http.IncomingMessage, res: http.ServerRes
         const k = d.pool.updateKey(id, keyInput((await body(req)) as Record<string, unknown>, true) as Parameters<KeyPool["updateKey"]>[1]);
         if (!k) return json(res, 404, { error: `no stored key ${id} (keys from PROVIDER_KEYS_JSON are read-only)` }), true;
         await d.savePool();
-        await audit(d, "key.update", id, { label: k.label, enabled: k.enabled, priority: k.priority });
+        await audit(d, "key.update", id, { label: k.label, enabled: k.enabled, priority: k.priority, teams: k.teams, tpmLimit: k.tpmLimit, rpmLimit: k.rpmLimit });
         return json(res, 200, { key: d.pool.view().keys.find((x) => x.id === id) }), true;
       }
 

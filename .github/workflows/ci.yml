@@ -1,0 +1,31 @@
+name: ci
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gateway:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway
+    env:
+      # The smoke suites talk to fake upstreams only; SigV4 just needs something to sign with.
+      AWS_ACCESS_KEY_ID: AKIAFAKEFAKEFAKEFAKE
+      AWS_SECRET_ACCESS_KEY: fake/fake/fake/fake/fake/fake/fake/fake
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: gateway/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run smoke

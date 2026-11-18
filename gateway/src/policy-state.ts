@@ -5,6 +5,7 @@
  */
 import type { Config, EffortMode, BudgetAction, UpstreamMode } from "./config.js";
 import { isModelPrice, priceKey, type ModelPrice } from "./pricing.js";
+import { validWebhookUrl } from "./alerts.js";
 
 export interface Policy {
   /** Which Bedrock API to call: Mantle Messages endpoint or classic Runtime InvokeModel. */
@@ -28,6 +29,10 @@ export interface Policy {
   defaultDailyTokenLimit: number;
   /** Price overrides edited in the admin UI, keyed by normalised model key (claude-opus-5-5). USD per million tokens. */
   pricing: Record<string, ModelPrice>;
+  /** Webhook for alerts (Slack / Discord / Teams / generic JSON). Empty = log only. */
+  alertWebhookUrl: string;
+  /** Also alert when a developer reaches a daily or monthly limit. */
+  alertOnBudget: boolean;
   updatedAt?: string;
 }
 
@@ -54,6 +59,8 @@ export function policyFromConfig(cfg: Config): Policy {
     defaultDailyBudgetUsd: 25,
     defaultDailyTokenLimit: 0,
     pricing: {},
+    alertWebhookUrl: cfg.alertWebhookUrl ?? "",
+    alertOnBudget: true,
   };
 }
 
@@ -122,8 +129,11 @@ export function validatePolicy(p: unknown): { ok: true; policy: Policy } | { ok:
     defaultDailyBudgetUsd: num("defaultDailyBudgetUsd", 0, 100_000),
     defaultDailyTokenLimit: o.defaultDailyTokenLimit === undefined ? 0 : num("defaultDailyTokenLimit", 0, 1e12),
     pricing: validatePricing(o.pricing, errors),
+    alertWebhookUrl: o.alertWebhookUrl === undefined || o.alertWebhookUrl === null ? "" : str("alertWebhookUrl").trim(),
+    alertOnBudget: o.alertOnBudget === undefined ? true : bool("alertOnBudget"),
     updatedAt: new Date().toISOString(),
   };
+  if (!validWebhookUrl(policy.alertWebhookUrl)) errors.push("alertWebhookUrl must be an http(s) URL or empty");
   if (policy.operatorPrompt.length > 4000) errors.push("operatorPrompt must be under 4000 characters");
   return errors.length ? { ok: false, errors } : { ok: true, policy };
 }

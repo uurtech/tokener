@@ -60,6 +60,36 @@ Developer tarafında hiçbir şey değişmez.
 **Beklenen sonuç.** Güvenli politikalarla %15–20, effort ayarıyla birlikte %30–35 düşüş.
 Hesaplar ve varsayımlar: [docs/COST_MODEL.md](docs/COST_MODEL.md). Altyapı ~$75/ay.
 
+## 5 dakikada kurulum
+
+Boş bir Linux sunucuda (her bulut olur), alan adının DNS kaydını sunucuya yönlendirip:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/uurtech/tokener/master/deploy/install.sh | sudo bash -s -- claude-gw.ornek.com
+```
+
+Gerekirse Docker'ı kurar, admin token ve `KEY_POOL_SECRET` üretir, tokener'ı Caddy arkasında otomatik HTTPS
+(Let's Encrypt) ile başlatır ve admin linkini yazar. Sonra **Keys** → Anthropic / Bedrock key'lerini ekle,
+**Developers** → kişileri oluştur, `settings.json` parçasını gönder. Sadece havuz key'leri kullanılıyorsa AWS hesabı
+gerekmez. Alan adı yoksa `:80` ile düz HTTP deneme yapılabilir. Hazır imaj: `ghcr.io/uurtech/tokener:latest`
+(amd64 + arm64). AWS hesabına kurmak için: `cd infra && npm ci && npx cdk deploy`.
+
+## v0.3 ile gelenler
+
+- **Uyarılar:** Slack / Discord / Teams / herhangi bir JSON webhook. Key reddedildi, kredisi bitti, sürekli hata
+  veriyor, hiç key kalmadı, key düzeldi, developer limite ulaştı. Tekrarlar bastırılır, istekleri hiç yavaşlatmaz.
+- **Takıma göre key grupları:** key'ler takımlara ayrılabilir; takım önce kendi key'lerini, doluysa ortak key'leri
+  kullanır, başka takımın key'ine hiç dokunmaz.
+- **Bedrock kotaları:** Bedrock rate-limit başlığı göndermediği için key'e dakikalık token / istek kotası girilir;
+  gateway kendisi sayar ve throttling başlamadan key'i park eder.
+- **Birden fazla task:** AWS'de soğuma durumları task'lar arasında saniyeler içinde paylaşılır ve restart'ta
+  kaybolmaz; oturumlar rendezvous hashing ile key'e atanır, böylece her task aynı oturumu aynı key'e gönderir.
+- **Aylık bütçe:** developer başına aylık USD ve token limiti.
+- **Developer sayfası `/me`:** developer kendi token'ıyla günlük/aylık harcama, limitler, 14 günlük grafik.
+- **Admin SSO:** OpenID Connect (Google Workspace, Okta, Entra ID, Auth0, Keycloak…), izinli alan adı / e-posta
+  listesiyle; audit log'da kimin ne yaptığı görünür.
+- **KMS şifreleme:** havuz key'leri AWS KMS veri anahtarıyla şifrelenir (CDK ve Marketplace stack'leri kurar).
+
 ## Key havuzu: çok key, tek endpoint (v0.2)
 
 Gateway'in arkasına birden fazla **Anthropic API key** (`sk-ant-…`) ve/veya **Bedrock API key** eklenir

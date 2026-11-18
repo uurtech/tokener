@@ -55,6 +55,9 @@ export interface Config {
 
   budgetAction: BudgetAction;
   downgradeModel?: string;
+
+  /** Slack / Discord / Teams / generic webhook for key and budget alerts. */
+  alertWebhookUrl?: string;
 }
 
 export const DEFAULT_MODEL_MAP: Record<string, string> = {
@@ -162,5 +165,6 @@ export function loadConfig(): Config {
 
     budgetAction: envEnum("BUDGET_ACTION", ["warn", "downgrade", "block"] as const, "warn"),
     downgradeModel: env("DOWNGRADE_MODEL"),
+    alertWebhookUrl: env("ALERT_WEBHOOK_URL"),
   };
 }

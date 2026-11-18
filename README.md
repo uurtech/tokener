@@ -9,12 +9,13 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)
 ![Amazon Bedrock](https://img.shields.io/badge/Amazon%20Bedrock-Mantle%20%7C%20Runtime-ff9900?logo=amazonwebservices&logoColor=white)
 ![AWS CDK](https://img.shields.io/badge/AWS%20CDK-v2-232f3e?logo=amazonwebservices&logoColor=white)
-![Version](https://img.shields.io/badge/version-0.2.0-6b7280)
+![Version](https://img.shields.io/badge/version-0.3.0-6b7280)
 
 **A drop-in API gateway for Claude Code: many Anthropic / Amazon Bedrock keys behind one endpoint, with automatic failover, plus cost visibility and control.**<br>
 Developers install nothing. They get a URL and a personal token, and the gateway handles the rest.
 
 [Quick start](#-quick-start-local-5-minutes) ·
+[Deploy in 5 minutes](#-deploy-in-5-minutes) ·
 [Key pool](#-key-pool-many-keys-one-endpoint) ·
 [Features](#-features) ·
 [Admin console](#-admin-console) ·
@@ -68,6 +69,34 @@ header; once the limit is passed it can warn, downgrade to a cheaper model, or b
 **Expected impact:** 15–20% lower cost with the safe policies, and 30–35% with effort tuning on top.
 Infrastructure costs about **$75/month**. Assumptions and math are in [docs/COST_MODEL.md](docs/COST_MODEL.md) (Turkish).
 
+## ⚡ Deploy in 5 minutes
+
+**One server, automatic HTTPS.** On a fresh Linux VM (any cloud, 1 vCPU / 1 GB is plenty for a team), point a DNS
+record at it and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/uurtech/tokener/master/deploy/install.sh | sudo bash -s -- claude-gw.example.com
+```
+
+It installs Docker if needed, generates the admin token and `KEY_POOL_SECRET`, starts tokener behind Caddy with a
+Let's Encrypt certificate, and prints the admin link. Then: **Keys** → add your Anthropic / Bedrock API keys,
+**Developers** → create people and send them the `settings.json` snippet. No AWS account needed when you only use
+pool keys. Pass `:80` instead of a domain for a quick plain-HTTP trial. Update later with
+`cd /opt/tokener && docker compose pull && docker compose up -d`.
+
+**Just the container:**
+
+```bash
+docker run -d -p 8080:8080 -v tokener:/app/data -e ADMIN_TOKEN=change-me -e KEY_POOL_SECRET=change-me-too \
+  -e STORE=sqlite -e SQLITE_PATH=/app/data/gateway.db ghcr.io/uurtech/tokener:latest
+```
+
+Images are published for `linux/amd64` and `linux/arm64` on every release (`:latest`, `:0.3`, `:0.3.0`).
+The compose files are in [`deploy/`](deploy/).
+
+**Your AWS account (Fargate + DynamoDB + ALB + KMS):** `cd infra && npm ci && npx cdk deploy`, see
+[Deploy to AWS](#%EF%B8%8F-deploy-to-aws). **AWS Marketplace:** [docs/MARKETPLACE.md](docs/MARKETPLACE.md).
+
 ## 🔁 Key pool: many keys, one endpoint
 
 Put several **Anthropic API keys** (`sk-ant-…`) and/or **Bedrock API keys** behind the gateway. Developers keep one
@@ -83,8 +112,12 @@ it moves on before the developer notices.
 | 📉 **Proactive switching** | `anthropic-ratelimit-*-remaining` headers are tracked per key. Below `softLimitPct` (5%) the key is parked until its reset time and used only as a last resort. |
 | ⏱ **Honest cooldowns** | Cooldowns follow `retry-after` and the reset headers. Repeated failures back off exponentially. When every key is out, the client gets a 429 with a real `retry-after`, or the gateway's own AWS credentials take over if `envFallback` is on. |
 | 🎯 **Per-key caps** | Optional daily token / USD caps per key. |
+| 👥 **Team key groups** | Reserve keys for teams (`backend`, `data`…). A team uses its own keys first and overflows to shared keys; other teams never touch them. Keeps each team on its own organization or AWS account. |
+| ⏲ **Bedrock quotas** | Bedrock sends no rate-limit headers, so give a key its tokens-per-minute / requests-per-minute quota. The gateway counts usage in a sliding minute and parks the key before throttling starts. |
+| 🌐 **Several tasks** | On AWS (DynamoDB store) cooldowns are shared between tasks within seconds and survive restarts, and new sessions are mapped to keys by rendezvous hashing, so every task puts a session on the same key and the prompt cache stays warm. |
+| 🔔 **Alerts** | Slack / Discord / Microsoft Teams / any JSON webhook: a key is rejected, out of credit or keeps failing, every key is unavailable, a key recovers, a developer reaches a limit. Throttled, never blocks a request. |
 | 📊 **Per-key analytics** | Requests, tokens, cost, failovers, live sessions and remaining rate limit per key. Every request records the key that served it (`x-gateway-key` header, Requests page, Dashboard "By upstream key"). |
-| 🔐 **Secrets** | AES-256-GCM at rest (`KEY_POOL_SECRET`, defaults to `ADMIN_TOKEN`). Tested with a free `count_tokens` call on save, shown only as their last four characters, never logged. |
+| 🔐 **Secrets** | AES-256-GCM at rest under an AWS KMS data key (`KEY_POOL_KMS_KEY_ID`, set up by the CDK and Marketplace stacks) or `KEY_POOL_SECRET` (defaults to `ADMIN_TOKEN`); switching re-encrypts automatically. Tested with a free `count_tokens` call on save, shown only as their last four characters, never logged. |
 
 > [!NOTE]
 > Anthropic applies rate and spend limits **per organization**, and Bedrock quotas are **per AWS account and region**.
@@ -156,7 +189,10 @@ Nothing changes for developers either way.
 | 💸 **Budgets & token limits** | Daily per-developer limits with `warn` / `downgrade` / `block`, reported in `x-gateway-budget*` headers. |
 | 📚 **Live model catalog** | Builds `/v1/models` from Bedrock (`ListFoundationModels` + `ListInferenceProfiles`), so `/model` just works. |
 | 🔁 **Key pool** | Several Anthropic / Bedrock keys behind one URL with rotation, transparent failover and per-key caps ([details](#-key-pool-many-keys-one-endpoint)). |
-| 🙋 **Self-service** | `GET /v1/me` with a developer token returns today's spend, tokens, cache hit rate and limits. |
+| 🙋 **Self-service** | Developers open `/me` (or call `GET /v1/me`) with their own token: today's and this month's spend, tokens, cache hit rate, limits with reset times, 14-day trend, allowed models. |
+| 📆 **Monthly budgets** | Monthly USD and token caps per developer, next to the daily ones, with an 80% warning header and an alert. |
+| 🔑 **Admin SSO** | OpenID Connect sign-in (Google Workspace, Okta, Entra ID, Auth0, Keycloak…) restricted to listed domains / e-mails, with the admin's e-mail in the audit log. The admin token keeps working for automation. |
+| 🔔 **Alerts** | Webhook alerts for key failures, pool exhaustion and developer limits (Policy → Alerts). |
 | 📊 **Observability** | CloudWatch EMF metrics, a dashboard and alarms, plus an in-app dashboard with a 14-day trend. |
 | 🔐 **Privacy by design** | Conversation content is never stored. Tokens are kept only as hashes, and logs contain numbers only. |
 | 🛒 **Marketplace-ready** | A hardened CloudFormation template with HTTPS only, private subnets, Secrets Manager and `RegisterUsage` metering. |
@@ -328,6 +364,14 @@ recommended: every policy off, bridging on.
 | `KEY_POOL_SECRET` | `ADMIN_TOKEN` | Encrypts upstream pool keys stored from the console. Changing it makes stored keys unreadable (they show as `error`). `npm run local` keeps one in `data/keypool.secret`. |
 | `PROVIDER_KEYS_JSON` | empty | Read-only pool keys: `[{"label","kind":"anthropic"\|"bedrock","key","region?","api?","priority?","dailyTokenLimit?","dailyBudgetUsd?"}]`. |
 | `ANTHROPIC_API_URL` | `https://api.anthropic.com` | Default base URL for Anthropic pool keys. |
+| `KEY_POOL_KMS_KEY_ID` | empty | KMS key (id / ARN / alias) for envelope encryption of pool keys. The CDK and Marketplace stacks create one. |
+| `ALERT_WEBHOOK_URL` | empty | Initial alert webhook (editable on the Policy page). |
+| `ALERT_SOURCE` | hostname | Name shown in alerts, e.g. `tokener-prod`. |
+| `OIDC_ISSUER` | empty | Enables admin SSO, e.g. `https://accounts.google.com`, `https://<tenant>.okta.com`, `https://login.microsoftonline.com/<tenant>/v2.0`. Callback URL: `https://<gateway>/admin/sso/callback`. |
+| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | empty | The OIDC app's credentials. |
+| `OIDC_ALLOWED_DOMAINS` / `OIDC_ALLOWED_EMAILS` | empty | Who may sign in (comma separated). Both empty = nobody. |
+| `OIDC_LABEL` | `SSO` | Button text: "Sign in with …". |
+| `SESSION_SECRET` | derived | Signs admin session cookies (12 h). Set it when running several tasks without `KEY_POOL_SECRET`. |
 | `UPSTREAM_TIMEOUT_MS` | `120000` | How long to wait for Bedrock's response headers before returning 504. There is no limit once streaming starts. |
 
 Setting `alertEmail` sends alarms by e-mail. Setting `domainName` + `certificateArn` adds an HTTPS listener and an HTTP→HTTPS redirect.
@@ -368,6 +412,8 @@ The default Bedrock quota of 2M input tokens per minute is not a constraint at t
 ## 🔐 Security
 
 - The ECS task role is the only identity that can call Bedrock. Developers hold no AWS credentials.
+- Admin sign-in with SSO (OIDC + PKCE, signed HttpOnly session cookies, CSRF guard on cookie writes) or the admin token.
+- Upstream API keys are encrypted at rest (KMS envelope or `KEY_POOL_SECRET`), never returned by the API, never logged.
 - Tokens are stored as SHA-256 hashes. Logs contain counts, the model and the session id, never prompt content.
 - Conversation content is never persisted. It is transformed in memory and forwarded.
 - `allowedModels` on a key restricts which models that developer can use.
@@ -392,6 +438,7 @@ gateway/      Node 22.13+ / TypeScript gateway (AWS SDK v3 only; no framework)
   test/       vitest unit tests + test/smoke/ end-to-end tests against a fake upstream
 infra/        AWS CDK: VPC, ECS Fargate, ALB, DynamoDB, CloudWatch, SNS + Marketplace stack
 scripts/      create/revoke/list tokens, usage report, release, deploy test
+deploy/       one-command server install: docker-compose + Caddy (automatic HTTPS) + install.sh
 docs/         cost model, Marketplace guide, screenshots
 ```
 
@@ -412,7 +459,7 @@ tool_result trimming, error passthrough and EMF metric output.
 - [ ] Prompt-cache pre-warming after compaction
 - [x] Several upstream keys behind one endpoint with failover (v0.2)
 - [x] Developer self-service usage endpoint `/v1/me` (v0.2)
-- [ ] Self-service dashboard page for developers
+- [x] Self-service page `/me`, monthly budgets, alerts, team key groups, Bedrock TPM/RPM, admin SSO, KMS, one-command deploy (v0.3)
 
 ## 🤝 Contributing
 

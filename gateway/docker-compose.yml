@@ -8,6 +8,7 @@ services:
       STORE: sqlite
       SQLITE_PATH: /app/data/gateway.db
       ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN to a long random value}
+      KEY_POOL_SECRET: ${KEY_POOL_SECRET:-}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       AWS_PROFILE: ${AWS_PROFILE:-default}
       EFFORT_MODE: ${EFFORT_MODE:-off}

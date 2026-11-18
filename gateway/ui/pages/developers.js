@@ -87,6 +87,11 @@ function openEditor(d, startWithPicker = false) {
       <section class="fs"><h3>Daily limits <span class="muted small">UTC day · either cap trips the policy action (${esc(p?.budgetAction || "warn")})</span></h3>
         <div class="row2">${limitField("dailyBudgetUsd", "Budget (USD)", 1, d?.dailyBudgetUsd)}${limitField("dailyTokenLimit", "Tokens", 100000, d?.dailyTokenLimit)}</div>
         <p class="muted small">${isEdit ? "Set a field to 0 or switch on Unlimited to remove a cap." : p ? `Empty = policy default: ${p.defaultDailyBudgetUsd ? fmtUsd(p.defaultDailyBudgetUsd) : "no"} budget, ${p.defaultDailyTokenLimit ? fmtK(p.defaultDailyTokenLimit) : "unlimited"} tokens.` : ""}</p></section>
+      <section class="fs"><h3>Monthly limits <span class="muted small">calendar month, UTC · optional</span></h3>
+        <div class="row2"><label>Budget (USD) <input name="monthlyBudgetUsd" type="number" min="0" step="10" placeholder="no cap" value="${d?.monthlyBudgetUsd || ""}"></label>
+        <label>Tokens <input name="monthlyTokenLimit" type="number" min="0" step="1000000" placeholder="no cap" value="${d?.monthlyTokenLimit || ""}"></label></div>
+        ${isEdit ? `<p class="muted small">This month so far: ${fmtUsd(d.monthCostUsd || 0)} · ${fmtK(d.monthTokens || 0)} tokens.</p>` : ""}
+        </section>
       <section class="fs"><h3>Bedrock API</h3>
         <div class="segmented" role="radiogroup">
           <label><input type="radio" name="upstreamMode" value="" ${!d?.upstreamMode ? "checked" : ""}><span><b>Policy default</b><small>currently ${policyApi}</small></span></label>
@@ -104,7 +109,8 @@ function openEditor(d, startWithPicker = false) {
         <div class="row-actions"><button type="button" class="ghost" id="rotate">Rotate token</button><a class="link-btn" href="#/requests?developer=${encodeURIComponent(d.developerId)}">View requests →</a></div></section>` : ""}
       <section class="fs hidden" id="reveal"><h3>Token</h3><div class="token-card"><p><strong>Shown once.</strong> Send both to the developer; only a hash is stored.</p>
         <div class="copy-row"><code id="tokenValue" class="mono"></code><button type="button" class="tiny ghost" id="copyToken">Copy token</button></div>
-        <pre id="snippetReveal" class="small"></pre><button type="button" class="tiny ghost" id="copySnippet">Copy settings.json snippet</button></div></section>
+        <pre id="snippetReveal" class="small"></pre><button type="button" class="tiny ghost" id="copySnippet">Copy settings.json snippet</button>
+        <p class="muted small">The developer can follow their own usage and limits at <code>/me</code>.</p><button type="button" class="tiny ghost" id="copyMe">Copy personal usage-page link</button></div></section>
     </form>`,
     footer: `<div class="danger-zone">${isEdit ? (d.enabled ? `<button type="button" class="tiny danger" id="revoke">Revoke</button>` : `<button type="button" class="tiny ghost" id="enable">Re-enable</button>`) : ""}</div>
       <div class="spacer"></div><span id="msg" class="muted small"></span><button type="button" class="ghost" data-close>Cancel</button><button type="submit" form="devForm" id="save">${isEdit ? "Save changes" : "Create developer"}</button>`,
@@ -146,7 +152,7 @@ function openEditor(d, startWithPicker = false) {
   const reveal = (tok) => {
     const snippet = settingsSnippet(tok);
     $("#tokenValue", el).textContent = tok; $("#snippetReveal", el).textContent = snippet;
-    $("#copyToken", el).onclick = () => copy(tok, "Token copied"); $("#copySnippet", el).onclick = () => copy(snippet, "Snippet copied");
+    $("#copyToken", el).onclick = () => copy(tok, "Token copied"); $("#copySnippet", el).onclick = () => copy(snippet, "Snippet copied"); $("#copyMe", el).onclick = () => copy(`${location.origin}/me/#token=${encodeURIComponent(tok)}`, "Usage-page link copied");
     $("#reveal", el).classList.remove("hidden"); $("#reveal", el).scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
@@ -159,6 +165,7 @@ function openEditor(d, startWithPicker = false) {
     const b = limit("dailyBudgetUsd"), t = limit("dailyTokenLimit");
     if (b !== undefined) body.dailyBudgetUsd = b;
     if (t !== undefined) body.dailyTokenLimit = t;
+    for (const m of ["monthlyBudgetUsd", "monthlyTokenLimit"]) { if (F(m).value !== "") body[m] = Number(F(m).value); else if (isEdit && d[m]) body[m] = 0; }
     save.disabled = true; msg.textContent = "";
     try {
       if (isEdit) {

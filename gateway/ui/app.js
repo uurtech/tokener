@@ -1,5 +1,5 @@
 /* tokener admin console — shell, auth, hash router, theme. Pages live in ./pages/*.js (ES modules, no build step). */
-import { $, $$, api, auth, setUnauthorizedHandler, toast, getConfig, esc } from "./lib.js";
+import { $, $$, api, auth, session, setUnauthorizedHandler, toast, getConfig, esc } from "./lib.js";
 import * as dashboard from "./pages/dashboard.js";
 import * as requests from "./pages/requests.js";
 import * as sessions from "./pages/sessions.js";
@@ -72,11 +72,23 @@ function buildNav() {
   $("#nav").innerHTML = NAV.map(([id, label, d]) => `<a href="#/${id}" data-page="${id}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg><span>${label}</span></a>`).join("");
 }
 
+let authCfg = { sso: false, tokenLogin: true, ssoLabel: null };
 function showLogin(msg = "") {
   $("#login").classList.remove("hidden");
   $("#shell").classList.add("hidden");
   $("#loginErr").textContent = msg;
-  $("#tokenInput").focus();
+  $("#ssoBtn").classList.toggle("hidden", !authCfg.sso);
+  $("#ssoBtn").textContent = `Sign in with ${authCfg.ssoLabel || "SSO"}`;
+  $("#ssoOr").classList.toggle("hidden", !(authCfg.sso && authCfg.tokenLogin));
+  $("#tokenLogin").classList.toggle("hidden", !authCfg.tokenLogin);
+  if (authCfg.tokenLogin) $("#tokenInput").focus();
+}
+/** Signed in if we hold an admin token, or the browser has a valid SSO session cookie. */
+async function whoami() {
+  const me = await api("/me");
+  session.sso = me.via === "sso";
+  session.email = me.email;
+  return me;
 }
 async function showShell() {
   $("#login").classList.add("hidden");
@@ -84,7 +96,7 @@ async function showShell() {
   try {
     const c = await getConfig(true);
     $("#envBadge").innerHTML = `${esc(c.region)} · ${esc(c.store)} · <span title="${esc(c.upstreamMode === "runtime" ? c.runtimeEndpoint : c.upstreamBaseUrl)}">${c.upstreamMode === "runtime" ? "Runtime API" : "Mantle API"}</span>${c.marketplace === "registered" ? " · Marketplace" : ""}`;
-    $("#versionBadge").textContent = `v${c.version}`;
+    $("#versionBadge").textContent = `v${c.version}${session.email ? ` · ${session.email}` : ""}`;
   } catch { /* shown on the System page anyway */ }
   await render();
 }
@@ -94,13 +106,13 @@ setUnauthorizedHandler(() => { auth.token = ""; showLogin("Session expired or to
 $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   auth.token = $("#tokenInput").value.trim();
-  try { await api("/me"); showShell(); } catch { auth.token = ""; showLogin("Token was not accepted."); }
+  try { await whoami(); showShell(); } catch { auth.token = ""; showLogin("Token was not accepted."); }
 });
-$("#logout").addEventListener("click", () => { auth.token = ""; showLogin(); });
+$("#logout").addEventListener("click", () => { auth.token = ""; if (session.sso) location.href = "/admin/sso/logout"; else showLogin(); });
 $("#themeBtn").addEventListener("click", () => theme.cycle());
 $("#refreshBtn").addEventListener("click", () => render());
 $("#sidebarToggle").addEventListener("click", () => $("#shell").classList.toggle("collapsed"));
-window.addEventListener("hashchange", () => { if (auth.token) render(); });
+window.addEventListener("hashchange", () => { if (auth.token || session.sso) render(); });
 document.addEventListener("keydown", (e) => {
   if (e.target.matches("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;
   const idx = Number(e.key);
@@ -112,7 +124,7 @@ buildNav();
 theme.apply(theme.get());
 (async () => {
   parseHash(); // consumes a legacy #token= deep link
-  if (!auth.token) return showLogin();
-  try { await api("/me"); await showShell(); } catch { showLogin(); }
+  try { authCfg = await (await fetch("/admin/api/auth-config")).json(); } catch { /* defaults */ }
+  try { await whoami(); await showShell(); } catch { auth.token = ""; showLogin(); }
 })();
 export { toast };

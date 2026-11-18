@@ -205,3 +205,5 @@ input.switch:checked { background: var(--accent); } input.switch:checked::after 
 small.block { display: block; margin-top: 2px; font-size: 11.5px; } tr.dim-row td { opacity: .55; }
 details summary { cursor: pointer; margin-bottom: 8px; }
 .pool-card { margin-bottom: 16px; }
+
+.btn-sso { display: block; text-align: center; padding: 10px 14px; border-radius: var(--r); background: var(--text); color: var(--surface); font-weight: 600; text-decoration: none; margin: 4px 0 8px; } .btn-sso:hover { opacity: .9; text-decoration: none; }
