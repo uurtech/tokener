@@ -55,6 +55,9 @@ await new Promise((r) => upstream.listen(UP_PORT, "127.0.0.1", r));
 const dir = mkdtempSync(path.join(tmpdir(), "tokener-v03-"));
 const { AWS_BEARER_TOKEN_BEDROCK: _k, ...inheritedEnv } = process.env;
 let gwOut = "";
+
+// Watchdog: never hang CI. Dump the gateway log and fail if the suite takes longer than 2 minutes.
+setTimeout(() => { console.log("\nTIMEOUT: smoke suite did not finish in 120 s\nGateway log tail:\n" + gwOut.split("\n").slice(-40).join("\n")); process.exit(1); }, 120_000).unref();
 let gw;
 const startGateway = async () => {
   gw = spawn("npx", ["tsx", "src/server.ts"], {

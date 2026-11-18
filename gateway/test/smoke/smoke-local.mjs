@@ -95,6 +95,9 @@ let gwOut = "";
 gw.stdout.on("data", (d) => (gwOut += d));
 gw.stderr.on("data", (d) => (gwOut += d));
 
+// Watchdog: never hang CI. Dump the gateway log and fail if the suite takes longer than 2 minutes.
+setTimeout(() => { console.log("\nTIMEOUT: smoke suite did not finish in 120 s\nGateway log tail:\n" + gwOut.split("\n").slice(-40).join("\n")); process.exit(1); }, 120_000).unref();
+
 const base = `http://127.0.0.1:${GW_PORT}`;
 for (let i = 0; i < 100; i++) {
   try { if ((await fetch(`${base}/health`)).ok) break; } catch {}

@@ -10,6 +10,7 @@ permissions:
 jobs:
   gateway:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: gateway
@@ -29,3 +30,4 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run smoke
+        timeout-minutes: 8
