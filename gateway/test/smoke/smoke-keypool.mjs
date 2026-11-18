@@ -43,7 +43,7 @@ const upstream = http.createServer(async (req, res) => {
 await new Promise((r) => upstream.listen(UP_PORT, "127.0.0.1", r));
 
 const { AWS_BEARER_TOKEN_BEDROCK: _k, ...inheritedEnv } = process.env;
-const gw = spawn("npx", ["tsx", "src/server.ts"], {
+const gw = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
   env: {
     ...inheritedEnv,
     PORT: String(GW_PORT), AWS_REGION: "us-east-1",
@@ -199,3 +199,4 @@ gw.kill("SIGTERM");
 upstream.close();
 if (failures.length) { console.log("\nGateway log tail:\n" + gwOut.split("\n").slice(-20).join("\n")); process.exit(1); }
 console.log("\nALL KEY POOL CHECKS PASSED");
+process.exit(0);

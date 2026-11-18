@@ -60,7 +60,7 @@ let gwOut = "";
 setTimeout(() => { console.log("\nTIMEOUT: smoke suite did not finish in 120 s\nGateway log tail:\n" + gwOut.split("\n").slice(-40).join("\n")); process.exit(1); }, 120_000).unref();
 let gw;
 const startGateway = async () => {
-  gw = spawn("npx", ["tsx", "src/server.ts"], {
+  gw = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
     env: {
       ...inheritedEnv, PORT: String(GW_PORT), AWS_REGION: "us-east-1", STORE: "sqlite", SQLITE_PATH: path.join(dir, "gw.db"),
       ADMIN_TOKEN: "adm", KEY_POOL_SECRET: "pool-secret", MODEL_CATALOG_ENABLED: "0", UPSTREAM_BASE_URL: `${UP}/env`,
@@ -209,3 +209,4 @@ upstream.close();
 rmSync(dir, { recursive: true, force: true });
 if (failures.length) { console.log("\nGateway log tail:\n" + gwOut.split("\n").slice(-25).join("\n")); process.exit(1); }
 console.log("\nALL v0.3 CHECKS PASSED");
+process.exit(0);
