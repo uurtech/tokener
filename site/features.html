@@ -21,12 +21,32 @@
   <div class="container">
     <p class="eyebrow">Features</p>
     <h1>Everything you need to run Claude Code <span class="grad">at team scale.</span></h1>
-    <p class="lead">Measure first, then pull the cost levers one at a time, without changing how developers work.</p>
+    <p class="lead">Pool your keys, measure first, then pull the cost levers one at a time, without changing how developers work.</p>
   </div>
 </section>
 
 <section>
   <div class="container">
+    <h2>Key pool <span class="grad">new in v0.2</span></h2>
+    <p class="section-lead">Many upstream keys, one endpoint. Developers keep a single <code>ANTHROPIC_BASE_URL</code>, and the gateway decides which key serves each request.</p>
+    <div class="grid grid-3">
+      <div class="card"><div class="icon">🔁</div><h3>Four rotation strategies</h3><p><b>Per session</b> (default) spreads new sessions and keeps each one on its key so the prompt cache stays warm. Also <b>round-robin</b>, <b>fill-first</b> by priority, and <b>least-used</b>.</p></div>
+      <div class="card"><div class="icon">🛟</div><h3>Invisible failover</h3><p>429, 529, 5xx, 401/403 and out-of-credit answers trigger a retry of the same request on the next key, before anything is streamed. Request errors such as a bad body are never retried.</p></div>
+      <div class="card"><div class="icon">📉</div><h3>Proactive switching</h3><p>Anthropic's <code>anthropic-ratelimit-*-remaining</code> headers are tracked per key. Under the threshold (5% by default), the key is parked until its reset time.</p></div>
+      <div class="card"><div class="icon">⏱</div><h3>Smart cooldowns</h3><p>Cooldowns follow <code>retry-after</code> and rate-limit reset times. Dead keys back off exponentially, and an honest 429 with <code>retry-after</code> is returned only when every key is out.</p></div>
+      <div class="card"><div class="icon">🎯</div><h3>Per-key caps</h3><p>Optional daily token and USD caps per key. A key that reaches its cap leaves the rotation until midnight UTC.</p></div>
+      <div class="card"><div class="icon">🧩</div><h3>Mix providers</h3><p>Anthropic API keys and Bedrock API keys (Mantle or Runtime, any region) in one pool. Bedrock can be the safety net when Anthropic is busy, or the other way round.</p></div>
+      <div class="card"><div class="icon">📊</div><h3>Per-key analytics</h3><p>Requests, tokens, cost, failovers, live sessions and remaining rate limit per key, plus a "by upstream key" breakdown on the dashboard.</p></div>
+      <div class="card"><div class="icon">🔐</div><h3>Encrypted at rest</h3><p>AES-256-GCM with <code>KEY_POOL_SECRET</code>. Keys are tested on save, shown only as their last four characters, and never logged.</p></div>
+      <div class="card"><div class="icon">🧾</div><h3>Config as code</h3><p>Manage keys in the console, or ship them read-only with <code>PROVIDER_KEYS_JSON</code> from Secrets Manager.</p></div>
+    </div>
+    <p class="section-lead" style="margin-top:18px">Limits apply per Anthropic organization and per AWS account and region. Keys from the same org share one limit; keys from separate orgs or accounts add up.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>Cost control</h2>
     <div class="grid grid-3">
       <div class="card"><div class="icon">🔌</div><h3>Zero install</h3><p>Two lines in <code>~/.claude/settings.json</code>. Developers need no AWS credentials.</p></div>
       <div class="card"><div class="icon">🧠</div><h3>Request-class routing</h3><p>Sends subagent, auxiliary and compaction traffic to its own model, such as Sonnet or Haiku.</p></div>
@@ -37,6 +57,9 @@
       <div class="card"><div class="icon">📚</div><h3>Live model catalog</h3><p>Builds <code>/v1/models</code> live from Bedrock, so <code>/model</code> just works.</p></div>
       <div class="card"><div class="icon">📊</div><h3>Observability</h3><p>CloudWatch EMF metrics, a dashboard and alarms, plus an in-app dashboard with a 14-day trend.</p></div>
       <div class="card"><div class="icon">🔐</div><h3>Privacy by design</h3><p>Conversation content is never stored. Tokens are kept only as hashes, and logs contain numbers only.</p></div>
+      <div class="card"><div class="icon">🙋</div><h3>Developer self-service</h3><p><code>GET /v1/me</code> with a personal token returns today's spend, tokens, cache hit rate and limits. No admin access needed.</p></div>
+      <div class="card"><div class="icon">🧾</div><h3>Audit trail</h3><p>Every admin action is logged: developers, policy, prices and key changes, never secrets.</p></div>
+      <div class="card"><div class="icon">🔀</div><h3>Two Bedrock APIs</h3><p>Mantle (Messages API) or Runtime (<code>InvokeModel</code>), switchable live, per policy, per developer or per key.</p></div>
     </div>
   </div>
 </section>

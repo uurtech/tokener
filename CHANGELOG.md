@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0 — 2026-11-18
+
+Key pool: many upstream keys, one endpoint.
+
+- Add several Anthropic API keys and/or Bedrock API keys (any account, region, Mantle or Runtime) from the new
+  **Keys** page or `PROVIDER_KEYS_JSON`. Developers keep one URL and token.
+- Rotation strategies: per session (default, cache-friendly), round-robin, fill-first, least-used.
+- Transparent failover: 429 / 529 / 5xx / 401 / 403 / out-of-credit answers and network errors retry the same request on
+  the next key before anything is streamed; cooldowns follow `retry-after` and rate-limit reset headers.
+- Proactive switching from Anthropic `anthropic-ratelimit-*` headers; optional per-key daily token / USD caps;
+  optional fallback to the gateway's own AWS credentials.
+- Secrets encrypted at rest (AES-256-GCM, `KEY_POOL_SECRET`), tested on save, never returned or logged.
+- Per-key usage: `x-gateway-key` header, key column and CSV field on Requests, "By upstream key" on the Dashboard,
+  key pool check in Diagnostics and `/health`.
+- Developer self-service endpoint `GET /v1/me`.
+- New smoke suite `test/smoke/smoke-keypool.mjs`; `npm run smoke` runs both suites.
+
 ## 0.1.0 — 2026-10-08
 
 First Marketplace candidate.

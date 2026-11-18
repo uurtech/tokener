@@ -5,15 +5,17 @@ import * as requests from "./pages/requests.js";
 import * as sessions from "./pages/sessions.js";
 import * as developers from "./pages/developers.js";
 import * as models from "./pages/models.js";
+import * as keys from "./pages/keys.js";
 import * as policy from "./pages/policy.js";
 import * as system from "./pages/system.js";
 
-const PAGES = { dashboard, requests, sessions, developers, models, policy, system };
+const PAGES = { dashboard, requests, sessions, developers, keys, models, policy, system };
 const NAV = [
   ["dashboard", "Dashboard", "M3 13h8V3H3v10Zm10 8h8V11h-8v10ZM3 21h8v-6H3v6Zm10-18v6h8V3h-8Z"],
   ["requests", "Requests", "M4 6h16M4 12h16M4 18h10"],
   ["sessions", "Sessions", "M12 8v4l3 3M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"],
   ["developers", "Developers", "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm13 10v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"],
+  ["keys", "Keys", "M15 7a4 4 0 1 1-3.87 5H9v2H7v2H4v-3l5.13-5.13A4 4 0 0 1 15 7Zm1 2.5a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1Z"],
   ["models", "Models", "M12 2 2 7l10 5 10-5-10-5ZM2 17l10 5 10-5M2 12l10 5 10-5"],
   ["policy", "Policy", "M12 3l8 4v5c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V7l8-4Zm-3 9 2 2 4-4"],
   ["system", "System", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.4-3a7.4 7.4 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a7.6 7.6 0 0 0-1.7-1L14.8 3H9.2l-.4 2.6a7.6 7.6 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.5a7.4 7.4 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7.6 7.6 0 0 0 1.7 1l.4 2.6h5.6l.4-2.6a7.6 7.6 0 0 0 1.7-1l2.4 1 2-3.4-2-1.5c.1-.3.1-.7.1-1Z"],

@@ -44,24 +44,26 @@ export async function render(main, params, { navigate }) {
     if (!rows.length) { $("#tbl").innerHTML = emptyState("No requests match", "Loosen the filters or wait for traffic."); return; }
     const sum = rows.reduce((a, r) => ({ cost: a.cost + r.costUsd, saved: a.saved + (r.savedUsd || 0), out: a.out + r.usage.outputTokens }), { cost: 0, saved: 0, out: 0 });
     $("#tbl").innerHTML = `<table class="data mono compact">
-      <thead><tr><th>Time (UTC)</th><th>Developer</th><th>Class</th><th>Model</th><th>Session</th><th class="num">Input</th><th class="num">Cache rd</th><th class="num">Cache wr</th><th class="num">Output</th><th class="num">Cost</th><th class="num">Saved</th><th class="num">Latency</th><th>Status</th><th>Policy</th></tr></thead>
+      <thead><tr><th>Time (UTC)</th><th>Developer</th><th>Class</th><th>Model</th><th>Key</th><th>Session</th><th class="num">Input</th><th class="num">Cache rd</th><th class="num">Cache wr</th><th class="num">Output</th><th class="num">Cost</th><th class="num">Saved</th><th class="num">Latency</th><th>Status</th><th>Policy</th></tr></thead>
       <tbody>${rows.map((r, i) => `<tr class="clickable" data-i="${i}">
         <td>${r.ts.slice(11, 19)}</td><td>${esc(r.developerId)}</td><td>${esc(r.requestClass)}</td>
         <td title="requested ${esc(r.requestedModel)}">${esc(shortModel(r.model))}${r.requestedModel && shortModel(r.requestedModel) !== shortModel(r.model) ? ` <span class="muted">← ${esc(shortModel(r.requestedModel))}</span>` : ""}</td>
+        <td title="${esc(r.providerKey || "env")}">${esc(r.providerKey && r.providerKey !== "env" ? r.providerKey.replace(/^k_/, "") : "–")}${r.failovers ? ` <span class="muted">↻${r.failovers}</span>` : ""}</td>
         <td title="${esc(r.sessionId || "")}">${esc((r.sessionId || "-").slice(0, 8))}</td>
         <td class="num">${fmtInt(r.usage.inputTokens)}</td><td class="num">${fmtInt(r.usage.cacheReadTokens)}</td><td class="num">${fmtInt(r.usage.cacheWrite5mTokens + r.usage.cacheWrite1hTokens)}</td><td class="num">${fmtInt(r.usage.outputTokens)}</td>
         <td class="num">${fmtUsd(r.costUsd)}</td><td class="num ${r.savedUsd ? "good" : "muted"}">${r.savedUsd ? fmtUsd(r.savedUsd) : "–"}</td><td class="num">${fmtMs(r.latencyMs)}</td>
         <td>${pill(r.status + (r.errorType ? ` ${r.errorType}` : ""), r.status < 400 && !r.errorType ? "on" : "off")}</td>
         <td class="muted">${r.notes.map((n) => `<span class="note">${esc(n)}</span>`).join(" ")}</td></tr>`).join("")}</tbody>
-      <tfoot><tr><td colspan="9">${rows.length} requests</td><td class="num">${fmtUsd(sum.cost)}</td><td class="num good">${sum.saved ? fmtUsd(sum.saved) : "–"}</td><td colspan="3" class="muted">${fmtInt(sum.out)} output tokens</td></tr></tfoot></table>`;
+      <tfoot><tr><td colspan="10">${rows.length} requests</td><td class="num">${fmtUsd(sum.cost)}</td><td class="num good">${sum.saved ? fmtUsd(sum.saved) : "–"}</td><td colspan="3" class="muted">${fmtInt(sum.out)} output tokens</td></tr></tfoot></table>`;
     $$("#tbl tbody tr").forEach((tr) => tr.addEventListener("click", () => {
       const r = rows[Number(tr.dataset.i)];
       const open = tr.nextElementSibling?.classList.contains("detail");
       $$("#tbl tr.detail").forEach((d) => d.remove());
       if (open) return;
       const d = document.createElement("tr"); d.className = "detail";
-      d.innerHTML = `<td colspan="14"><div class="detail-grid">
+      d.innerHTML = `<td colspan="15"><div class="detail-grid">
         <div><small>Requested → served</small><b>${esc(r.requestedModel || "-")} → ${esc(r.model)}</b></div>
+        <div><small>Upstream key</small><b>${esc(r.providerKey || "env")}${r.failovers ? ` · after ${r.failovers} failover${r.failovers > 1 ? "s" : ""}` : ""}</b></div>
         <div><small>Stream</small><b>${r.stream ? "SSE" : "JSON"}</b></div>
         <div><small>Team</small><b>${esc(r.team || "-")}</b></div>
         <div><small>Session</small><b class="mono">${esc(r.sessionId || "-")}</b> <a class="link-btn" href="#/sessions?session=${encodeURIComponent(r.sessionId || "")}&day=${r.ts.slice(0, 10)}">open →</a></div>
@@ -72,8 +74,8 @@ export async function render(main, params, { navigate }) {
     }));
   };
   $("#csv").addEventListener("click", () => downloadCsv(`tokener-requests-${new Date().toISOString().slice(0, 10)}.csv`, [
-    ["ts", "developer", "team", "class", "requestedModel", "model", "session", "status", "errorType", "latencyMs", "inputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens", "costUsd", "savedUsd", "notes"],
-    ...rows.map((r) => [r.ts, r.developerId, r.team, r.requestClass, r.requestedModel, r.model, r.sessionId, r.status, r.errorType, r.latencyMs, r.usage.inputTokens, r.usage.cacheReadTokens, r.usage.cacheWrite5mTokens + r.usage.cacheWrite1hTokens, r.usage.outputTokens, r.costUsd, r.savedUsd || 0, r.notes.join(" ")]),
+    ["ts", "developer", "team", "class", "requestedModel", "model", "session", "status", "errorType", "latencyMs", "inputTokens", "cacheReadTokens", "cacheWriteTokens", "outputTokens", "costUsd", "savedUsd", "providerKey", "failovers", "notes"],
+    ...rows.map((r) => [r.ts, r.developerId, r.team, r.requestClass, r.requestedModel, r.model, r.sessionId, r.status, r.errorType, r.latencyMs, r.usage.inputTokens, r.usage.cacheReadTokens, r.usage.cacheWrite5mTokens + r.usage.cacheWrite1hTokens, r.usage.outputTokens, r.costUsd, r.savedUsd || 0, r.providerKey || "env", r.failovers || 0, r.notes.join(" ")]),
   ]));
   let timer;
   $("#live").addEventListener("change", (e) => { clearInterval(timer); if (e.target.checked) timer = setInterval(load, 10_000); });

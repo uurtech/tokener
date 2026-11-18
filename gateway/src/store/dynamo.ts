@@ -7,15 +7,18 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, ScanCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import type { Policy } from "../policy-state.js";
-import { aggregate, dayKey, hitPct, lastDays, monthKey, ZERO_TOTALS, type AuditEvent, type AuditStore, type BreakdownRow, type DailyTotals, type DeveloperRecord, type KeyStore, type Overview, type PolicyStore, type RequestRecord, type Store, type UsageStore } from "./types.js";
+import type { PoolDoc } from "../keypool.js";
+import { aggregate, dayKey, hitPct, lastDays, monthKey, ZERO_TOTALS, type AuditEvent, type AuditStore, type BreakdownRow, type DailyTotals, type DeveloperRecord, type KeyStore, type Overview, type PolicyStore, type PoolStore, type RequestRecord, type Store, type UsageStore } from "./types.js";
 
 const POLICY_KEY = "POLICY#v1";
+const POOL_KEY = "KEYPOOL#v1";
 
 export class DynamoStore implements Store {
   readonly kind = "dynamo" as const;
   readonly keys: KeyStore;
   readonly usage: UsageStore;
   readonly policy: PolicyStore;
+  readonly pool: PoolStore;
   readonly audit: AuditStore;
   private readonly ring: RequestRecord[] = [];
   private readonly ringMax = 2000;
@@ -144,6 +147,7 @@ export class DynamoStore implements Store {
           { pk: `ALL`, sk: `DAY#${dayKey(now)}` },
           { pk: `DEV#${r.developerId}`, sk: `DAY#${dayKey(now)}#MODEL#${r.model}` },
           { pk: `MODEL#${r.model}`, sk: `DAY#${dayKey(now)}` },
+          ...(r.providerKey ? [{ pk: `KEY#${r.providerKey}`, sk: `DAY#${dayKey(now)}` }] : []),
         ];
         await Promise.all(
           keys.map((k) =>
@@ -215,7 +219,7 @@ export class DynamoStore implements Store {
             })
             .sort((a, b) => b.costUsd - a.costUsd);
         };
-        const [byDeveloper, byModel] = await Promise.all([scan("DEV#", `DAY#${day}`), scan("MODEL#", `DAY#${day}`)]);
+        const [byDeveloper, byModel, byKey] = await Promise.all([scan("DEV#", `DAY#${day}`), scan("MODEL#", `DAY#${day}`), scan("KEY#", `DAY#${day}`)]);
         const mem = aggregate(day, ring.filter((r) => r.ts.startsWith(day)), "dynamo+memory");
         const totals = byDeveloper.reduce<DailyTotals>(
           (a, r) => ({
@@ -229,7 +233,20 @@ export class DynamoStore implements Store {
           }),
           ZERO_TOTALS(),
         );
-        return { ...mem, byDeveloper, byModel, totals: { ...totals, cacheHitPct: hitPct(totals), developers: byDeveloper.length } } satisfies Overview;
+        return { ...mem, byDeveloper, byModel, byKey: byKey.length ? byKey : mem.byKey, totals: { ...totals, cacheHitPct: hitPct(totals), developers: byDeveloper.length } } satisfies Overview;
+      },
+      async keyTotals(providerKey) {
+        const res = await ddb.send(new GetCommand({ TableName: usageTable, Key: { pk: `KEY#${providerKey}`, sk: `DAY#${dayKey()}` } }));
+        const it = (res.Item ?? {}) as Record<string, number>;
+        return {
+          requests: it.requests ?? 0,
+          costUsd: (it.costMicros ?? 0) / 1_000_000,
+          savedUsd: (it.savedMicros ?? 0) / 1_000_000,
+          inputTokens: it.inputTokens ?? 0,
+          cacheReadTokens: it.cacheReadTokens ?? 0,
+          cacheWriteTokens: it.cacheWriteTokens ?? 0,
+          outputTokens: it.outputTokens ?? 0,
+        };
       },
       async recentRequests(f) {
         const src = ring.filter(
@@ -284,6 +301,17 @@ export class DynamoStore implements Store {
       },
       async save(p) {
         await ddb.send(new PutCommand({ TableName: keysTable, Item: { keyHash: POLICY_KEY, policyJson: JSON.stringify(p), updatedAt: new Date().toISOString() } }));
+      },
+    };
+
+    this.pool = {
+      async load() {
+        const res = await ddb.send(new GetCommand({ TableName: keysTable, Key: { keyHash: POOL_KEY } }));
+        const it = res.Item as Record<string, unknown> | undefined;
+        return it && typeof it.poolJson === "string" ? (JSON.parse(it.poolJson) as PoolDoc) : null;
+      },
+      async save(doc) {
+        await ddb.send(new PutCommand({ TableName: keysTable, Item: { keyHash: POOL_KEY, poolJson: JSON.stringify(doc), updatedAt: new Date().toISOString() } }));
       },
     };
   }

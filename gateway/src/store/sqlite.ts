@@ -6,7 +6,8 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Policy } from "../policy-state.js";
-import { hitPct, lastDays, ZERO_TOTALS, type AuditStore, type BreakdownRow, type DailyTotals, type DeveloperRecord, type KeyStore, type Overview, type PolicyStore, type RequestRecord, type Store, type UsageStore } from "./types.js";
+import type { PoolDoc } from "../keypool.js";
+import { hitPct, lastDays, ZERO_TOTALS, type AuditStore, type BreakdownRow, type DailyTotals, type DeveloperRecord, type KeyStore, type Overview, type PolicyStore, type PoolStore, type RequestRecord, type Store, type UsageStore } from "./types.js";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS developers (
@@ -43,7 +44,9 @@ CREATE TABLE IF NOT EXISTS requests (
   saved_usd REAL NOT NULL DEFAULT 0,
   stream INTEGER NOT NULL,
   notes TEXT,
-  error_type TEXT
+  error_type TEXT,
+  provider_key TEXT,
+  failovers INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS requests_day_dev ON requests(day, developer_id);
 CREATE INDEX IF NOT EXISTS requests_ts ON requests(ts);
@@ -92,6 +95,8 @@ function toReq(r: Row): RequestRecord {
     stream: Number(r.stream) === 1,
     notes: r.notes ? (r.notes as string).split(" ").filter(Boolean) : [],
     errorType: (r.error_type as string | null) ?? undefined,
+    providerKey: (r.provider_key as string | null) ?? undefined,
+    failovers: Number(r.failovers ?? 0) || undefined,
   };
 }
 
@@ -117,6 +122,7 @@ export class SqliteStore implements Store {
   readonly keys: KeyStore;
   readonly usage: UsageStore;
   readonly policy: PolicyStore;
+  readonly pool: PoolStore;
   readonly audit: AuditStore;
 
   constructor(file: string) {
@@ -131,6 +137,9 @@ export class SqliteStore implements Store {
     if (!cols.has("upstream_mode")) db.exec("ALTER TABLE developers ADD COLUMN upstream_mode TEXT");
     const rcols = new Set((db.prepare("PRAGMA table_info(requests)").all() as Row[]).map((r) => String(r.name)));
     if (!rcols.has("saved_usd")) db.exec("ALTER TABLE requests ADD COLUMN saved_usd REAL NOT NULL DEFAULT 0");
+    if (!rcols.has("provider_key")) db.exec("ALTER TABLE requests ADD COLUMN provider_key TEXT");
+    if (!rcols.has("failovers")) db.exec("ALTER TABLE requests ADD COLUMN failovers INTEGER NOT NULL DEFAULT 0");
+    db.exec("CREATE INDEX IF NOT EXISTS requests_day_key ON requests(day, provider_key)");
 
     this.keys = {
       async lookupByHash(keyHash) {
@@ -183,13 +192,13 @@ export class SqliteStore implements Store {
     };
 
     const insert = db.prepare(`INSERT INTO requests (ts, day, developer_id, team, session_id, request_class, requested_model, model, status, latency_ms,
-      input_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, output_tokens, cost_usd, saved_usd, stream, notes, error_type)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      input_tokens, cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens, output_tokens, cost_usd, saved_usd, stream, notes, error_type, provider_key, failovers)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
 
     this.usage = {
       async record(r) {
         insert.run(r.ts, r.ts.slice(0, 10), r.developerId, r.team ?? null, r.sessionId ?? null, r.requestClass, r.requestedModel, r.model, r.status, r.latencyMs,
-          r.usage.inputTokens, r.usage.cacheReadTokens, r.usage.cacheWrite5mTokens, r.usage.cacheWrite1hTokens, r.usage.outputTokens, r.costUsd, r.savedUsd ?? 0, r.stream ? 1 : 0, r.notes.join(" "), r.errorType ?? null);
+          r.usage.inputTokens, r.usage.cacheReadTokens, r.usage.cacheWrite5mTokens, r.usage.cacheWrite1hTokens, r.usage.outputTokens, r.costUsd, r.savedUsd ?? 0, r.stream ? 1 : 0, r.notes.join(" "), r.errorType ?? null, r.providerKey ?? null, r.failovers ?? 0);
       },
       async todayTotals(developerId) {
         const day = new Date().toISOString().slice(0, 10);
@@ -222,6 +231,7 @@ export class SqliteStore implements Store {
           byDeveloper: group("developer_id"),
           byModel: group("model"),
           byClass: group("request_class"),
+          byKey: group("COALESCE(provider_key, 'env')"),
           byHour: hours,
           topSessions: sessions,
           source: "sqlite",
@@ -239,6 +249,10 @@ export class SqliteStore implements Store {
         vals.push(lim);
         const rows = db.prepare(`SELECT * FROM requests ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id DESC LIMIT ?`).all(...(vals as never[])) as Row[];
         return rows.map(toReq);
+      },
+      async keyTotals(providerKey) {
+        const day = new Date().toISOString().slice(0, 10);
+        return totals(db.prepare(`SELECT ${TOTALS_SQL} FROM requests WHERE day = ? AND provider_key = ?`).get(day, providerKey) as Row);
       },
       async trend(days) {
         const keys = lastDays(days);
@@ -272,6 +286,16 @@ export class SqliteStore implements Store {
       },
       async save(p) {
         db.prepare("INSERT INTO settings (key, value, updated_at) VALUES ('policy', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(JSON.stringify(p), new Date().toISOString());
+      },
+    };
+
+    this.pool = {
+      async load() {
+        const r = db.prepare("SELECT value FROM settings WHERE key = 'keypool'").get() as Row | undefined;
+        return r ? (JSON.parse(r.value as string) as PoolDoc) : null;
+      },
+      async save(doc) {
+        db.prepare("INSERT INTO settings (key, value, updated_at) VALUES ('keypool', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(JSON.stringify(doc), new Date().toISOString());
       },
     };
   }

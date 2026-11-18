@@ -60,6 +60,29 @@ Developer tarafında hiçbir şey değişmez.
 **Beklenen sonuç.** Güvenli politikalarla %15–20, effort ayarıyla birlikte %30–35 düşüş.
 Hesaplar ve varsayımlar: [docs/COST_MODEL.md](docs/COST_MODEL.md). Altyapı ~$75/ay.
 
+## Key havuzu: çok key, tek endpoint (v0.2)
+
+Gateway'in arkasına birden fazla **Anthropic API key** (`sk-ant-…`) ve/veya **Bedrock API key** eklenir
+(panel → **Keys** veya `PROVIDER_KEYS_JSON`). Developer'lar tek `ANTHROPIC_BASE_URL` ve kişisel token'la devam eder;
+hangi key'in kullanılacağına gateway karar verir.
+
+- **Rotasyon:** `session` (varsayılan; yeni oturumlar key'lere dağıtılır, her oturum kendi key'inde kalır, prompt
+  cache bozulmaz), `round-robin`, `fill-first` (önceliğe göre), `least-used`.
+- **Görünmez failover:** 429, 529/503, 5xx, 401/403 veya "credit balance too low" gelirse key soğumaya alınır ve
+  **aynı istek** bir sonraki key'le tekrar denenir. Henüz istemciye hiçbir şey stream edilmediği için Claude Code
+  sadece başarılı cevabı görür. İstek hataları (bozuk gövde vb.) olduğu gibi iletilir.
+- **Proaktif geçiş:** Anthropic `anthropic-ratelimit-*-remaining` başlıklarında kalan kapasite %5'in altına düşen
+  key, reset zamanına kadar park edilir; 429 gelmeden yeni iş diğer key'lere gider.
+- **Key başına günlük token / USD limiti**, key başına kullanım, failover ve kalan rate limit göstergesi.
+- **Gizlilik:** key'ler AES-256-GCM ile şifreli saklanır (`KEY_POOL_SECRET`, yoksa `ADMIN_TOKEN`), eklenirken
+  ücretsiz `count_tokens` ile test edilir, bir daha gösterilmez, loglara yazılmaz.
+
+> **Not:** Anthropic rate ve harcama limitleri **organizasyon başına**, Bedrock kotaları **AWS hesabı + bölge
+> başına** uygulanır. Aynı organizasyondaki key'ler aynı limiti paylaşır; kapasiteyi artırmak için farklı
+> organizasyon/hesaplardan key kullanın ve sağlayıcı sözleşmelerinizin buna izin verdiğini kontrol edin.
+
+Developer'lar kendi kullanımını `GET /v1/me` ile görebilir.
+
 ## Depo yapısı
 
 ```

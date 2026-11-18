@@ -180,3 +180,5 @@ th { color: var(--muted); font-weight: 600; font-size: .8rem; text-transform: up
 
 .grid > * { min-width: 0; }
 p code, li code, td code { overflow-wrap: anywhere; }
+.docs-body ul { color: var(--muted); padding-left: 20px; } .docs-body li { margin: 6px 0; } .docs-body li b { color: var(--text, inherit); }
+h2 .grad { background: linear-gradient(90deg, #1f6fe0, #7c3aed); -webkit-background-clip: text; background-clip: text; color: transparent; font-size: .7em; margin-left: 6px; vertical-align: middle; }

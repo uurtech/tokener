@@ -16,6 +16,7 @@ import { totalTokens } from "./budget.js";
 import { annotateCatalog, type ModelCatalog } from "./models.js";
 import { pricingTable, priceFor, priceKey } from "./pricing.js";
 import { validatePricing } from "./policy-state.js";
+import { fingerprint, validateSettings, type KeyPool, type ProviderKind } from "./keypool.js";
 
 export interface AdminDeps {
   cfg: Config;
@@ -32,6 +33,59 @@ export interface AdminDeps {
   marketplace: () => string;
   diagnose: () => Promise<unknown>;
   previewPolicy: (draft: Policy) => unknown;
+  pool: KeyPool;
+  savePool: () => Promise<void>;
+  testKey: (id: string) => Promise<{ ok: boolean; ms: number; status?: number; detail: string }>;
+}
+
+const REGION_RE = /^[a-z]{2}(-[a-z]+)+-\d$/;
+
+/** Shared validation for key create / patch. `partial` skips required checks. */
+function keyInput(b: Record<string, unknown>, partial: boolean) {
+  const out: Record<string, unknown> = {};
+  if (!partial || b.label !== undefined) {
+    const label = String(b.label ?? "").trim();
+    if (!label || label.length > 64) throw new BadRequest("label: 1-64 characters");
+    out.label = label;
+  }
+  if (!partial) {
+    if (b.kind !== "anthropic" && b.kind !== "bedrock") throw new BadRequest("kind must be anthropic or bedrock");
+    out.kind = b.kind as ProviderKind;
+  }
+  if (!partial || (b.secret !== undefined && b.secret !== "")) {
+    const secret = String(b.secret ?? "").trim();
+    if (secret.length < 8 || secret.length > 8192 || /\s/.test(secret)) throw new BadRequest("secret: paste the full API key (no spaces)");
+    out.secret = secret;
+  }
+  if (b.region !== undefined && b.region !== null && b.region !== "") {
+    if (typeof b.region !== "string" || !REGION_RE.test(b.region)) throw new BadRequest("region must look like us-east-1");
+    out.region = b.region;
+  } else if (b.region === "" || b.region === null) out.region = "";
+  if (b.api !== undefined) {
+    if (b.api !== null && b.api !== "" && b.api !== "mantle" && b.api !== "runtime") throw new BadRequest("api must be mantle, runtime or empty");
+    out.api = b.api || undefined;
+    if (!out.api && partial) out.api = "";
+  }
+  if (b.baseUrl !== undefined && b.baseUrl !== null && b.baseUrl !== "") {
+    try {
+      const u = new URL(String(b.baseUrl));
+      if (u.protocol !== "https:" && u.protocol !== "http:") throw new Error();
+    } catch {
+      throw new BadRequest("baseUrl must be an http(s) URL");
+    }
+    out.baseUrl = String(b.baseUrl).replace(/\/+$/, "");
+  } else if (b.baseUrl === "" || b.baseUrl === null) out.baseUrl = "";
+  for (const f of ["dailyTokenLimit", "dailyBudgetUsd"] as const) if (b[f] !== undefined && b[f] !== null && b[f] !== "") out[f] = nonNegative(b[f], f);
+  if (b.priority !== undefined && b.priority !== null && b.priority !== "") {
+    const n = Number(b.priority);
+    if (!Number.isInteger(n) || n < 0 || n > 100000) throw new BadRequest("priority must be an integer 0-100000");
+    out.priority = n;
+  }
+  if (b.enabled !== undefined) {
+    if (typeof b.enabled !== "boolean") throw new BadRequest("enabled must be a boolean");
+    out.enabled = b.enabled;
+  }
+  return out;
 }
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -282,6 +336,57 @@ export async function handleAdmin(req: http.IncomingMessage, res: http.ServerRes
       case route === "GET /models": {
         const snap = await d.catalog.get(query.get("refresh") === "1");
         return json(res, 200, { ...snap, models: annotateCatalog(snap.models, d.getPolicy().modelMap).map((m) => ({ ...m, priceKey: priceKey(m.id), price: priceFor(m.id) ?? null, priceOverridden: priceKey(m.id) in d.getPolicy().pricing })) }), true;
+      }
+
+      case route === "GET /keys":
+        return json(res, 200, d.pool.view()), true;
+
+      case route === "PUT /keys/settings": {
+        const v = validateSettings((await body(req)) as Record<string, unknown>);
+        if (!v.ok) return json(res, 400, { error: v.error }), true;
+        d.pool.setSettings(v.value);
+        await d.savePool();
+        await audit(d, "keys.settings", undefined, v.value as Record<string, unknown>);
+        return json(res, 200, d.pool.view()), true;
+      }
+
+      case route === "POST /keys": {
+        if (!d.pool.canStoreSecrets) return json(res, 400, { error: "Set KEY_POOL_SECRET (or ADMIN_TOKEN) so keys can be encrypted at rest." }), true;
+        const inp = keyInput((await body(req)) as Record<string, unknown>, false) as Parameters<KeyPool["addKey"]>[0];
+        const dup = d.pool.allKeys().find((k) => k.fingerprint === fingerprint(inp.secret));
+        if (dup) return json(res, 409, { error: `this key is already in the pool as "${dup.label}"` }), true;
+        const k = d.pool.addKey(inp);
+        await d.savePool();
+        await audit(d, "key.create", k.id, { label: k.label, kind: k.kind, last4: k.last4, region: k.region, api: k.api });
+        const test = query.get("test") === "0" ? null : await d.testKey(k.id);
+        return json(res, 201, { key: d.pool.view().keys.find((x) => x.id === k.id), test }), true;
+      }
+
+      case /^POST \/keys\/[^/]+\/(test|reset)$/.test(route): {
+        const [, , id, action] = pathname.slice("/admin/api".length).split("/");
+        if (action === "reset") {
+          d.pool.resetCooldown(decodeURIComponent(id));
+          await audit(d, "key.reset", decodeURIComponent(id));
+          return json(res, 200, d.pool.view()), true;
+        }
+        return json(res, 200, await d.testKey(decodeURIComponent(id))), true;
+      }
+
+      case /^PATCH \/keys\/[^/]+$/.test(route): {
+        const id = decodeURIComponent(pathname.split("/").pop()!);
+        const k = d.pool.updateKey(id, keyInput((await body(req)) as Record<string, unknown>, true) as Parameters<KeyPool["updateKey"]>[1]);
+        if (!k) return json(res, 404, { error: `no stored key ${id} (keys from PROVIDER_KEYS_JSON are read-only)` }), true;
+        await d.savePool();
+        await audit(d, "key.update", id, { label: k.label, enabled: k.enabled, priority: k.priority });
+        return json(res, 200, { key: d.pool.view().keys.find((x) => x.id === id) }), true;
+      }
+
+      case /^DELETE \/keys\/[^/]+$/.test(route): {
+        const id = decodeURIComponent(pathname.split("/").pop()!);
+        if (!d.pool.removeKey(id)) return json(res, 404, { error: `no stored key ${id}` }), true;
+        await d.savePool();
+        await audit(d, "key.delete", id);
+        return json(res, 200, { deleted: id }), true;
       }
 
       case route === "GET /policy":

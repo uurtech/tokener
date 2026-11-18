@@ -1,7 +1,7 @@
 // Local runner: SQLite store, admin UI, real Bedrock through your AWS credentials.
 // Usage: npm run local        (env: AWS_REGION / AWS_PROFILE as usual; ADMIN_TOKEN optional)
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,11 +19,25 @@ if (existsSync(envFile)) {
 const dist = path.join(root, "dist", "server.js");
 const adminToken = process.env.ADMIN_TOKEN || randomBytes(12).toString("hex");
 const port = process.env.PORT || "8080";
+// Upstream pool keys are encrypted with KEY_POOL_SECRET. Locally we keep one in data/ so keys survive a
+// changed or random ADMIN_TOKEN.
+const sqlitePath = process.env.SQLITE_PATH || path.join(root, "data", "gateway.db");
+let keyPoolSecret = process.env.KEY_POOL_SECRET;
+if (!keyPoolSecret && sqlitePath !== ":memory:") {
+  const f = path.join(path.dirname(sqlitePath), "keypool.secret");
+  if (existsSync(f)) keyPoolSecret = readFileSync(f, "utf8").trim();
+  else {
+    mkdirSync(path.dirname(f), { recursive: true });
+    keyPoolSecret = randomBytes(32).toString("hex");
+    writeFileSync(f, keyPoolSecret + "\n", { mode: 0o600 });
+  }
+}
 const env = {
   ...process.env,
+  ...(keyPoolSecret ? { KEY_POOL_SECRET: keyPoolSecret } : {}),
   PORT: port,
   STORE: "sqlite",
-  SQLITE_PATH: process.env.SQLITE_PATH || path.join(root, "data", "gateway.db"),
+  SQLITE_PATH: sqlitePath,
   ADMIN_TOKEN: adminToken,
   AWS_REGION: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1",
 };

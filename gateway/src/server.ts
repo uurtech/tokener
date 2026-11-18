@@ -11,12 +11,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { transformRequest, isConversationStart, resolveModel, type Json, type RequestMeta } from "./policy.js";
 import { SseUsageTap, summaryFromMessage, type StreamSummary } from "./sse.js";
-import { createStore, type RequestRecord } from "./store/index.js";
+import { createStore, hitPct, type RequestRecord } from "./store/index.js";
 import { effectiveConfig, policyFromConfig, type Policy } from "./policy-state.js";
 import { handleAdmin } from "./admin.js";
 import { budgetHeaders, budgetMessage, evaluateBudget, hasLimits, type BudgetState } from "./budget.js";
 import { ModelCatalog, modelsForClients, sdkLister } from "./models.js";
 import { BedrockRuntimeUpstream, sdkRuntimeClient, toRuntimeModelId } from "./upstream-runtime.js";
+import { KeyPool, SecretBox, classifyFailure, toAnthropicModelId, ENV_KEY_ID, type Selected } from "./keypool.js";
+import type { UpstreamMode } from "./config.js";
 import { marketplaceSettingsFromEnv, registerWithMarketplace, sdkMeteringClient, type MarketplaceStatus } from "./marketplace.js";
 
 const baseCfg: Config = loadConfig();
@@ -32,6 +34,13 @@ const runtime = new BedrockRuntimeUpstream(sdkRuntimeClient(baseCfg.awsRegion, b
 const upstreamLabel = () => (cfg.upstreamMode === "runtime" ? runtimeEndpoint : cfg.upstreamBaseUrl);
 const catalog = new ModelCatalog(baseCfg.modelCatalogEnabled ? sdkLister(baseCfg.awsRegion) : null, baseCfg.modelCatalogTtlMs, baseCfg.awsRegion);
 const adminToken = process.env.ADMIN_TOKEN ?? "";
+const ANTHROPIC_API_URL = process.env.ANTHROPIC_API_URL || "https://api.anthropic.com";
+// Upstream key pool. Secrets are sealed with KEY_POOL_SECRET (falls back to ADMIN_TOKEN).
+const keyPool = new KeyPool(
+  new SecretBox(process.env.KEY_POOL_SECRET || adminToken || undefined),
+  { label: process.env.AWS_BEARER_TOKEN_BEDROCK ? "Bedrock API key (AWS_BEARER_TOKEN_BEDROCK)" : "AWS credentials (task role / IAM)" },
+);
+keyPool.loadEnvKeys(process.env.PROVIDER_KEYS_JSON);
 const emfEnabled = (process.env.EMF_ENABLED ?? (store.kind === "dynamo" ? "1" : "0")) === "1";
 const startedAt = Date.now();
 const VERSION = (() => {
@@ -63,6 +72,144 @@ async function setPolicy(p: Policy): Promise<void> {
   cfg = effectiveConfig(baseCfg, p);
   setPolicyPricing(p.pricing);
   log({ event: "policy_updated", api: p.upstreamMode, profilePrefix: p.bedrockProfilePrefix, effortMode: p.effortMode, routeSubagent: p.routeSubagentModel, routeAuxiliary: p.routeAuxiliaryModel, budgetAction: p.budgetAction });
+}
+
+async function reloadPool(): Promise<void> {
+  try {
+    keyPool.load(await store.pool.load());
+  } catch (e) {
+    log({ event: "keypool_load_failed", error: String(e) });
+  }
+}
+async function savePool(): Promise<void> {
+  await store.pool.save(keyPool.toDoc());
+}
+/** Today's per-key usage from the store, so daily key caps survive restarts and add up across tasks. */
+async function seedPoolUsage(): Promise<void> {
+  for (const k of keyPool.allKeys()) {
+    try {
+      const t = await store.usage.keyTotals(k.id);
+      keyPool.seedUsage(k.id, { requests: t.requests, tokens: t.inputTokens + t.cacheReadTokens + t.cacheWriteTokens + t.outputTokens, costUsd: t.costUsd });
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
+/* ---------------- upstream dispatch (one call on one key) ---------------- */
+
+interface Call {
+  op: "messages" | "count_tokens";
+  body: Json;
+  betaHeader?: string;
+  stream: boolean;
+  query: string;
+  reqHeaders: http.IncomingHttpHeaders;
+  signal: AbortSignal;
+  mode: UpstreamMode;
+  /** Policy-resolved Bedrock-style model id (anthropic.claude-...). */
+  upstreamModel: string;
+  timeoutMs?: number;
+}
+interface CallResult {
+  res: Response;
+  invokedModel: string;
+  api: string;
+  keyId: string;
+  failovers: number;
+}
+
+const keyClients = new Map<string, { version: string; mantle?: Upstream; runtime?: BedrockRuntimeUpstream; anthropic?: Upstream }>();
+function clientsFor(sel: Selected) {
+  let c = keyClients.get(sel.id);
+  if (!c || c.version !== sel.version) {
+    c = { version: sel.version };
+    keyClients.set(sel.id, c);
+  }
+  const region = sel.region ?? baseCfg.awsRegion;
+  if (sel.kind === "anthropic") c.anthropic ??= new Upstream(sel.baseUrl ?? ANTHROPIC_API_URL, region, sel.secret, "x-api-key");
+  else {
+    c.mantle ??= new Upstream(sel.baseUrl ?? (sel.region ? `https://bedrock-mantle.${sel.region}.api.aws/anthropic` : baseCfg.upstreamBaseUrl), region, sel.secret);
+    c.runtime ??= new BedrockRuntimeUpstream(
+      sdkRuntimeClient(region, sel.region ? undefined : baseCfg.bedrockRuntimeEndpoint, baseCfg.upstreamTimeoutMs, sel.secret),
+      sel.region ? `https://bedrock-runtime.${sel.region}.amazonaws.com` : runtimeEndpoint,
+    );
+  }
+  return c;
+}
+
+async function callKey(sel: Selected, c: Call): Promise<Omit<CallResult, "keyId" | "failovers">> {
+  const path = `${c.op === "messages" ? "/v1/messages" : "/v1/messages/count_tokens"}${c.query}`;
+  const timeout = c.timeoutMs ?? cfg.upstreamTimeoutMs;
+  if (sel.kind === "anthropic") {
+    const up = clientsFor(sel).anthropic!;
+    const model = toAnthropicModelId(c.upstreamModel);
+    const res = await up.send("POST", path, up.pickRequestHeaders(c.reqHeaders, c.betaHeader), JSON.stringify({ ...c.body, model }), c.signal, timeout);
+    return { res, invokedModel: model, api: "anthropic" };
+  }
+  const isEnv = sel.id === ENV_KEY_ID;
+  const mantle = isEnv ? upstream : clientsFor(sel).mantle!;
+  const viaMantle = () => mantle.send("POST", path, mantle.pickRequestHeaders(c.reqHeaders, c.betaHeader), JSON.stringify(c.body), c.signal, timeout);
+  if ((sel.api ?? c.mode) === "runtime") {
+    const rt = isEnv ? runtime : clientsFor(sel).runtime!;
+    const id = toRuntimeModelId(c.upstreamModel, cfg.bedrockProfilePrefix, catalog.peek().models);
+    if (c.op === "messages") return { res: await rt.messages(id, c.body, c.betaHeader, c.stream, c.signal), invokedModel: id, api: "runtime" };
+    let res = await rt.countTokens(id, c.body, c.betaHeader, c.signal);
+    // Not every model supports Runtime CountTokens yet; the Mantle endpoint counts for all of them.
+    if (res.status === 400 && /counting tokens/i.test(await res.clone().text())) res = await viaMantle();
+    return { res, invokedModel: id, api: "runtime" };
+  }
+  return { res: await viaMantle(), invokedModel: c.upstreamModel, api: "mantle" };
+}
+
+class PoolExhausted extends Error {
+  constructor(readonly retryAfterMs: number) {
+    super("Every upstream key is cooling down or over its daily cap.");
+  }
+}
+
+/**
+ * Send one request through the key pool. A key that answers 429 / 529 / 5xx / 401 / 403 / out-of-credit
+ * (or fails at the network level) is put on cooldown and the request moves to the next key. Nothing
+ * has been sent to the client yet, so the failover is invisible. Without pool keys this is a single
+ * call on the gateway's own credentials, exactly as before.
+ */
+async function dispatch(c: Call, sessionKey: string | undefined, notes: string[], logCtx: Record<string, unknown> = {}): Promise<CallResult> {
+  const tried = new Set<string>();
+  const max = keyPool.configured ? Math.max(1, keyPool.settings.maxAttempts) : 1;
+  let lastHttp: CallResult | undefined;
+  let lastThrow: unknown;
+  for (let i = 0; i < max; i++) {
+    const sel = keyPool.select({ sessionKey, model: c.upstreamModel, exclude: tried });
+    if (!sel) break;
+    tried.add(sel.id);
+    try {
+      const r = await callKey(sel, c);
+      if (r.res.ok) {
+        keyPool.markSuccess(sel.id, r.res.headers);
+        return { ...r, keyId: sel.id, failovers: i };
+      }
+      const text = await r.res.text();
+      const verdict = classifyFailure(r.res.status, text, r.res.headers);
+      keyPool.markFailure(sel.id, { ...verdict, status: r.res.status, error: text.slice(0, 300) });
+      lastHttp = { ...r, res: new Response(text, { status: r.res.status, headers: r.res.headers }), keyId: sel.id, failovers: i };
+      if (!verdict.retry || !keyPool.configured) return lastHttp;
+      notes.push(`failover:${sel.id}:${r.res.status}`);
+      log({ event: "key_failover", ...logCtx, key: sel.id, status: r.res.status, reason: verdict.reason, cooldownMs: verdict.cooldownMs });
+    } catch (e) {
+      if (c.signal.aborted || !keyPool.configured) throw e;
+      const cause = (e as Error & { cause?: unknown }).cause;
+      const msg = cause instanceof Error ? cause.message : (e as Error).message;
+      keyPool.markFailure(sel.id, { retry: true, cooldownMs: 10_000, reason: "network", error: msg });
+      notes.push(`failover:${sel.id}:net`);
+      log({ event: "key_failover", ...logCtx, key: sel.id, error: msg });
+      lastThrow = e;
+    }
+  }
+  // Prefer a real upstream answer (e.g. the last 429) over a credential error from the env fallback.
+  if (lastHttp) return lastHttp;
+  if (lastThrow) throw lastThrow;
+  throw new PoolExhausted(keyPool.nextAvailableInMs());
 }
 
 function log(obj: Record<string, unknown>): void {
@@ -212,54 +359,67 @@ async function handleMessages(req: http.IncomingMessage, res: http.ServerRespons
   }
 
   const stream = body.stream === true;
-  // Runtime mode addresses the model in the URL and usually needs an inference-profile id.
   const mode = dev.upstreamMode ?? cfg.upstreamMode;
-  const invokedModel = mode === "runtime" ? toRuntimeModelId(tr.upstreamModel, cfg.bedrockProfilePrefix, catalog.peek().models) : tr.upstreamModel;
-  if (mode === "runtime") tr.notes.push(invokedModel !== tr.upstreamModel ? `runtime:${invokedModel.split(".")[0]}` : "runtime");
 
   const ac = new AbortController();
   req.on("close", () => {
     if (!res.writableEnded) ac.abort();
   });
 
-  let upstreamRes: Response;
+  let call: CallResult;
   try {
-    if (mode === "runtime") {
-      upstreamRes = await runtime.messages(invokedModel, body, tr.betaHeader, stream, ac.signal);
-    } else {
-      const upstreamHeaders = upstream.pickRequestHeaders(req.headers, tr.betaHeader);
-      upstreamRes = await upstream.send("POST", `/v1/messages${query}`, upstreamHeaders, JSON.stringify(body), ac.signal, cfg.upstreamTimeoutMs);
-    }
+    call = await dispatch(
+      { op: "messages", body, betaHeader: tr.betaHeader, stream, query, reqHeaders: req.headers, signal: ac.signal, mode, upstreamModel: tr.upstreamModel },
+      meta.sessionId ?? dev.developerId,
+      tr.notes,
+      { developer: dev.developerId },
+    );
   } catch (e) {
     if (res.writableEnded || ac.signal.aborted) return; // client went away; nothing to answer
+    if (e instanceof PoolExhausted) {
+      const sec = Math.max(1, Math.ceil(e.retryAfterMs / 1000));
+      log({ event: "keypool_exhausted", developer: dev.developerId, retryAfterSec: sec });
+      return apiError(res, 429, "rate_limit_error", `${e.message} Retry in ${sec}s.`, { ...extraHeaders, "retry-after": String(sec) });
+    }
     const cause = (e as Error & { cause?: unknown }).cause;
     const msg = cause instanceof Error ? cause.message : (e as Error).message;
     const timedOut = /did not respond within/.test(msg);
     log({ event: timedOut ? "upstream_timeout" : "upstream_error", developer: dev.developerId, error: msg });
     return apiError(res, timedOut ? 504 : 502, "api_error", `Upstream request failed: ${msg}`, extraHeaders);
   }
+  const upstreamRes = call.res;
+  const invokedModel = call.invokedModel;
+  const api = call.api;
+  if (api === "runtime") tr.notes.push(invokedModel !== tr.upstreamModel ? `runtime:${invokedModel.split(".")[0]}` : "runtime");
+  if (call.keyId !== ENV_KEY_ID) tr.notes.push(`key:${call.keyId}`);
 
-  const resHeaders: Record<string, string> = { ...upstream.pickResponseHeaders(upstreamRes), ...extraHeaders, "x-gateway-model": invokedModel, "x-gateway-api": mode };
+  const resHeaders: Record<string, string> = { ...upstream.pickResponseHeaders(upstreamRes), ...extraHeaders, "x-gateway-model": invokedModel, "x-gateway-api": api, "x-gateway-key": call.keyId };
   let summary: StreamSummary = { usage: { ...EMPTY_USAGE }, sawMessageStop: false };
 
+  // Anthropic-served requests are recorded under the same Bedrock-style id as Mantle so reports group one model once.
+  const recordedModel = api === "anthropic" ? tr.upstreamModel : invokedModel;
   const finish = (status: number, errorType?: string) => {
     const rec: RequestRecord = {
       ts: new Date(started).toISOString(),
       developerId: dev.developerId,
       team: dev.team,
-      model: invokedModel,
+      model: recordedModel,
       requestedModel,
       requestClass: meta.requestClass ?? "unknown",
       sessionId: meta.sessionId,
       status,
       latencyMs: Date.now() - started,
       usage: summary.usage,
-      costUsd: estimateCostUsd(invokedModel, summary.usage),
-      savedUsd: savingsUsd(requestedModel, invokedModel, summary.usage),
+      costUsd: estimateCostUsd(recordedModel, summary.usage),
+      savedUsd: savingsUsd(requestedModel, recordedModel, summary.usage),
       stream,
       notes: tr.notes,
       errorType: errorType ?? summary.errorType,
+      providerKey: call.keyId,
+      failovers: call.failovers || undefined,
     };
+    const u = summary.usage;
+    keyPool.recordUsage(call.keyId, u.inputTokens + u.cacheReadTokens + u.cacheWrite5mTokens + u.cacheWrite1hTokens + u.outputTokens, rec.costUsd);
     void recordUsage(rec);
   };
 
@@ -268,7 +428,7 @@ async function handleMessages(req: http.IncomingMessage, res: http.ServerRespons
     const text = await upstreamRes.text();
     res.writeHead(upstreamRes.status, { ...resHeaders, "content-type": resHeaders["content-type"] ?? "application/json" });
     res.end(text);
-    log({ event: "upstream_status", developer: dev.developerId, api: mode, status: upstreamRes.status, model: invokedModel, body: text.slice(0, 500) });
+    log({ event: "upstream_status", developer: dev.developerId, api, key: call.keyId, status: upstreamRes.status, model: invokedModel, body: text.slice(0, 500) });
     finish(upstreamRes.status, "upstream_error");
     return;
   }
@@ -320,19 +480,16 @@ async function handleCountTokens(req: http.IncomingMessage, res: http.ServerResp
     if (!res.writableEnded) ac.abort();
   });
   try {
-    const viaMantle = () => upstream.send("POST", `/v1/messages/count_tokens${query}`, upstream.pickRequestHeaders(req.headers, tr.betaHeader), JSON.stringify(body), ac.signal, cfg.upstreamTimeoutMs);
-    let r: Response;
-    if ((dev.upstreamMode ?? cfg.upstreamMode) === "runtime") {
-      r = await runtime.countTokens(toRuntimeModelId(tr.upstreamModel, cfg.bedrockProfilePrefix, catalog.peek().models), body, tr.betaHeader, ac.signal);
-      // Not every model supports Runtime CountTokens yet; the Mantle endpoint counts for all of them.
-      if (r.status === 400 && /counting tokens/i.test(await r.clone().text())) r = await viaMantle();
-    } else {
-      r = await viaMantle();
-    }
+    const { res: r } = await dispatch(
+      { op: "count_tokens", body, betaHeader: tr.betaHeader, stream: false, query, reqHeaders: req.headers, signal: ac.signal, mode: dev.upstreamMode ?? cfg.upstreamMode, upstreamModel: tr.upstreamModel },
+      metaFrom(req).sessionId ?? dev.developerId,
+      [],
+    );
     const text = await r.text();
     res.writeHead(r.status, { ...upstream.pickResponseHeaders(r), "content-type": r.headers.get("content-type") ?? "application/json" });
     res.end(text);
   } catch (e) {
+    if (e instanceof PoolExhausted) return apiError(res, 429, "rate_limit_error", e.message, { "retry-after": String(Math.max(1, Math.ceil(e.retryAfterMs / 1000))) });
     apiError(res, 502, "api_error", `Upstream request failed: ${(e as Error).message}`);
   }
 }
@@ -412,14 +569,67 @@ async function diagnose() {
     if (!r.ok) throw new Error(`HTTP ${r.status} ${text.slice(0, 200)}`);
     return `${cfg.upstreamMode} count_tokens ok (${upstream.authMode}) -> ${text.slice(0, 60)}`;
   });
+  await timed("keypool", async () => {
+    const v = keyPool.view();
+    if (!v.summary.total) return `no pool keys; using ${v.envCredential}`;
+    const bad = v.keys.filter((k) => k.status === "error" || k.status === "disabled");
+    if (!v.summary.available && !(v.settings.envFallback && v.envCredential)) throw new Error(`0 of ${v.summary.total} keys available`);
+    return `${v.summary.available} of ${v.summary.total} keys available · strategy ${v.settings.strategy}${bad.length ? ` · ${bad.length} disabled/error` : ""}`;
+  });
   out.marketplace = { ok: marketplace.state !== "failed", ms: 0, detail: marketplace.state };
   return { ok: Object.values(out).every((c) => c.ok), ms: Date.now() - t0, checks: out };
+}
+
+/** Free count_tokens round trip on one specific key (admin "Test" button). */
+async function testKey(id: string): Promise<{ ok: boolean; ms: number; status?: number; detail: string }> {
+  const t0 = Date.now();
+  const sel = keyPool.handle(id);
+  if (!sel) return { ok: false, ms: 0, detail: `no key ${id}` };
+  const model = cfg.modelMap["claude-haiku-4-5"] ?? "anthropic.claude-haiku-4-5";
+  const body: Json = { model, messages: [{ role: "user", content: "ping" }] };
+  const tr = transformRequest(body, undefined, {}, { ...cfg, operatorPrompt: undefined, toolResultMaxChars: 0 });
+  try {
+    const r = await callKey(sel, { op: "count_tokens", body, stream: false, query: "", reqHeaders: {}, signal: new AbortController().signal, mode: cfg.upstreamMode, upstreamModel: tr.upstreamModel, timeoutMs: 15_000 });
+    const text = await r.res.text();
+    if (r.res.ok) {
+      keyPool.resetCooldown(id);
+      keyPool.markSuccess(id, r.res.headers);
+      return { ok: true, ms: Date.now() - t0, status: r.res.status, detail: `${r.api} count_tokens ok -> ${text.slice(0, 80)}` };
+    }
+    const v = classifyFailure(r.res.status, text, r.res.headers);
+    if (v.retry) keyPool.markFailure(id, { ...v, status: r.res.status, error: text.slice(0, 300) });
+    return { ok: false, ms: Date.now() - t0, status: r.res.status, detail: text.slice(0, 300) };
+  } catch (e) {
+    return { ok: false, ms: Date.now() - t0, detail: (e as Error).message };
+  }
+}
+
+/** Developer self-service: who am I, what are my limits, how much have I used today. */
+async function handleMe(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const dev = await authenticate(req, res);
+  if (!dev) return;
+  const t = await store.usage.todayTotals(dev.developerId);
+  const b = hasLimits(dev) ? evaluateBudget(dev, t) : { exceeded: false, spentUsd: t.costUsd, usedTokens: t.inputTokens + t.cacheReadTokens + t.cacheWriteTokens + t.outputTokens };
+  sendJson(res, 200, {
+    developerId: dev.developerId,
+    team: dev.team ?? null,
+    day: new Date().toISOString().slice(0, 10),
+    limits: { dailyBudgetUsd: dev.dailyBudgetUsd || null, dailyTokenLimit: dev.dailyTokenLimit || null, action: cfg.budgetAction },
+    today: { requests: t.requests, costUsd: Math.round(t.costUsd * 1e4) / 1e4, tokens: t.inputTokens + t.cacheReadTokens + t.cacheWriteTokens + t.outputTokens, cacheHitPct: hitPct(t) },
+    exceeded: b.exceeded,
+    allowedModels: dev.allowedModels?.length ? dev.allowedModels : null,
+    resetsAt: `${new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)}T00:00:00Z`,
+  });
 }
 
 const server = http.createServer(async (req, res) => {
   const { path, query, params } = normalizePath(req.url ?? "/");
   try {
-    if (req.method === "GET" && path === "/health") return sendJson(res, 200, { ok: true, api: cfg.upstreamMode, upstream: upstreamLabel(), auth: upstream.authMode, store: store.kind, marketplace: marketplace.state });
+    if (req.method === "GET" && path === "/health") {
+      const pool = keyPool.view().summary;
+      return sendJson(res, 200, { ok: true, api: cfg.upstreamMode, upstream: upstreamLabel(), auth: upstream.authMode, store: store.kind, marketplace: marketplace.state, keys: pool });
+    }
+    if (req.method === "GET" && path === "/v1/me") return await handleMe(req, res);
     if (req.method === "HEAD" && path === "/api/hello") {
       res.writeHead(200);
       return res.end();
@@ -428,7 +638,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(302, { location: "/admin/" });
       return res.end();
     }
-    if (adminToken && (await handleAdmin(req, res, path, params, { cfg: baseCfg, store, auth, adminToken, getPolicy: () => policy, setPolicy, startedAt, catalog, runtimeEndpoint, version: VERSION, authMode: upstream.authMode, marketplace: () => marketplace.state, diagnose, previewPolicy }))) return;
+    if (adminToken && (await handleAdmin(req, res, path, params, { cfg: baseCfg, store, auth, adminToken, getPolicy: () => policy, setPolicy, startedAt, catalog, runtimeEndpoint, version: VERSION, authMode: upstream.authMode, marketplace: () => marketplace.state, diagnose, previewPolicy, pool: keyPool, savePool, testKey }))) return;
     if (req.method === "GET" && path === "/v1/models") {
       const dev = await authenticate(req, res);
       if (!dev) return;
@@ -464,7 +674,13 @@ if (marketplaceSettings.productCode) {
 }
 
 await reloadPolicy();
-if (store.kind === "dynamo") setInterval(() => void reloadPolicy(), 30_000).unref();
+await reloadPool();
+await seedPoolUsage();
+if (store.kind === "dynamo") {
+  setInterval(() => void reloadPolicy(), 30_000).unref();
+  setInterval(() => void reloadPool(), 30_000).unref();
+  setInterval(() => void seedPoolUsage(), 60_000).unref();
+}
 // Warm the model catalog in the background so the first /v1/models or admin call is instant.
 void catalog.get().then((s) => log({ event: "model_catalog", models: s.models.length, error: s.error, disabled: s.disabled }));
 
@@ -481,6 +697,8 @@ server.listen(cfg.port, () => {
     effortMode: cfg.effortMode,
     bridge: cfg.bridgeBedrock,
     budgetAction: cfg.budgetAction,
+    keys: keyPool.view().summary,
+    keyStrategy: keyPool.settings.strategy,
   });
 });
 

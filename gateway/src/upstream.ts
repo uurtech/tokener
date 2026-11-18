@@ -25,7 +25,11 @@ export class Upstream {
    *   `Authorization: Bearer <key>` instead of a SigV4 signature; the AWS SDK clients used elsewhere
    *   honour the same variable automatically, so one key covers every upstream.
    */
-  constructor(baseUrl: string, region: string, bearerToken?: string) {
+  /**
+   * @param apiKeyHeader When set (e.g. "x-api-key" for api.anthropic.com), the key travels in this header
+   *   instead of `Authorization: Bearer`.
+   */
+  constructor(baseUrl: string, region: string, bearerToken?: string, private readonly apiKeyHeader?: string) {
     this.base = new URL(baseUrl.endsWith("/") ? baseUrl : baseUrl + "/");
     this.bearer = bearerToken?.trim() || undefined;
     this.signer = new SignatureV4({
@@ -68,7 +72,7 @@ export class Upstream {
     const url = this.url(pathWithQuery);
     const h: Record<string, string> = {};
     if (this.bearer) {
-      Object.assign(h, { "content-type": "application/json", ...headers, authorization: `Bearer ${this.bearer}` });
+      Object.assign(h, { "content-type": "application/json", ...headers }, this.apiKeyHeader ? { [this.apiKeyHeader]: this.bearer } : { authorization: `Bearer ${this.bearer}` });
     } else {
       const query: Record<string, string> = {};
       url.searchParams.forEach((v, k) => (query[k] = v));

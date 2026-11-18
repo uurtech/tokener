@@ -28,7 +28,7 @@
 <section>
   <div class="container">
     <h2>The request pipeline</h2>
-    <p class="section-lead">Every request passes through five stages. Responses stream straight back to Claude Code as SSE.</p>
+    <p class="section-lead">Every request passes through six stages. Responses stream straight back to Claude Code as SSE.</p>
     <div class="flow">
       <div class="step"><b>Claude Code</b><span>ANTHROPIC_BASE_URL</span></div>
       <div class="arrow">→</div>
@@ -38,9 +38,24 @@
       <div class="arrow">→</div>
       <div class="step"><b>budget</b><span>USD and token limits</span></div>
       <div class="arrow">→</div>
+      <div class="step"><b>key pool</b><span>pick key, fail over</span></div>
+      <div class="arrow">→</div>
       <div class="step"><b>SigV4 / API key</b><span>signs upstream call</span></div>
       <div class="arrow">→</div>
       <div class="step"><b>metering</b><span>usage, cost, EMF</span></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>How the key pool decides</h2>
+    <p class="section-lead">For each request the gateway ranks the keys, then calls the best one. If it fails for a key-level reason, the same request goes to the next key. Nothing has been streamed yet, so Claude Code never sees the switch.</p>
+    <div class="grid grid-2">
+      <div class="card"><h3>1 · Rank</h3><p>Healthy keys come first. Keys parked near their rate limit come next, then the gateway's own AWS credentials if fallback is on. Disabled, capped and cooling keys are skipped.</p></div>
+      <div class="card"><h3>2 · Pick</h3><p><b>Per session</b>: a session stays on its key (cache stays warm), and new sessions go to the key with the fewest live sessions. Or round-robin, fill-first, least-used.</p></div>
+      <div class="card"><h3>3 · Classify</h3><p>429 → cool down until <code>retry-after</code>. 529/503 → 15 s. 401 → 10 min. Out of credit → 1 h. 5xx → 5 s, backing off on repeats. 400/404 request errors are forwarded unchanged.</p></div>
+      <div class="card"><h3>4 · Learn</h3><p>Successful answers update the key's rate-limit snapshot. Below the threshold the key is parked until its reset time, so the next session lands elsewhere before a 429 happens.</p></div>
     </div>
   </div>
 </section>
@@ -91,6 +106,8 @@
       <div class="card"><p>Tokens are stored as SHA-256 hashes. Logs contain counts, the model and the session id, never prompt content.</p></div>
       <div class="card"><p>Conversation content is never persisted. It is transformed in memory and forwarded.</p></div>
       <div class="card"><p>A per-key <code>allowedModels</code> list restricts which models each developer can use.</p></div>
+      <div class="card"><p>Upstream API keys are encrypted at rest with AES-256-GCM and never returned by the admin API or written to logs.</p></div>
+      <div class="card"><p>Developers only hold a gateway token. Provider keys can be rotated or revoked centrally without touching a single laptop.</p></div>
     </div>
   </div>
 </section>

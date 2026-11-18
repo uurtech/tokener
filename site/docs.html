@@ -30,6 +30,7 @@
     <nav class="docs-nav" aria-label="Docs">
       <a href="#quick-start">Quick start</a>
       <a href="#developer-setup">Developer setup</a>
+      <a href="#key-pool">Key pool</a>
       <a href="#deploy">Deploy to AWS</a>
       <a href="#configuration">Configuration</a>
       <a href="#testing">Testing</a>
@@ -59,6 +60,20 @@ npm run local</code></pre>
 }</code></pre>
       <p><code>CLAUDE_CODE_GATEWAY_HINT_HEADERS</code> matters most: without it, every request counts as the main conversation and routing has nothing to work with.</p>
 
+      <h2 id="key-pool">Key pool: several keys, one endpoint</h2>
+      <p>Open <b>Keys</b> in the console and add Anthropic API keys (<code>sk-ant-…</code>) and/or Bedrock API keys. Each key is tested with a free <code>count_tokens</code> call and then joins the rotation. Developers change nothing.</p>
+      <ul>
+        <li><b>Per session</b> (default): each Claude Code session sticks to one key, so the prompt cache stays warm, and new sessions are spread evenly.</li>
+        <li><b>Failover</b>: on 429, 529, 5xx, 401/403 or "credit balance too low", the same request is retried on the next key. Request errors are never retried.</li>
+        <li><b>Proactive</b>: an Anthropic key under 5% of any rate-limit bucket is parked until its reset time.</li>
+        <li><b>Fallback</b>: when every key is out, the gateway's own AWS credentials can serve as a last resort. Without fallback, Claude Code gets a 429 with an honest <code>retry-after</code>.</li>
+      </ul>
+      <p>Limits apply per Anthropic organization and per AWS account and region, so add keys from separate orgs or accounts to raise the total. Keys can also be shipped read-only from config:</p>
+      <pre><code>KEY_POOL_SECRET=change-me   <span class="c-comment"># encrypts stored keys (defaults to ADMIN_TOKEN)</span>
+PROVIDER_KEYS_JSON='[{"label":"org-a","kind":"anthropic","key":"sk-ant-..."},
+                     {"label":"acct-2","kind":"bedrock","key":"ABSK...","region":"us-west-2"}]'</code></pre>
+      <p>Each developer can check their own usage with <code>curl -H "Authorization: Bearer cgw_..." $GATEWAY/v1/me</code>.</p>
+
       <h2 id="deploy">Deploy to AWS</h2>
       <p>Requires AWS CLI v2, Node.js 22+, Docker and AWS CDK v2. A domain and ACM certificate are optional; without them the ALB serves HTTP, which is fine for a POC only.</p>
       <pre><code>cd gateway &amp;&amp; npm ci &amp;&amp; npm test
@@ -80,6 +95,8 @@ npx cdk deploy      <span class="c-comment"># ~8 min</span></code></pre>
           <tr><td><code>TOOL_RESULT_MAX_CHARS</code></td><td><code>0</code></td><td><code>20000</code> is recommended.</td></tr>
           <tr><td><code>BUDGET_ACTION</code></td><td><code>warn</code></td><td><code>warn</code>, <code>downgrade</code> or <code>block</code>.</td></tr>
           <tr><td><code>UPSTREAM_MODE</code></td><td><code>mantle</code></td><td><code>mantle</code> or <code>runtime</code>. Switchable live.</td></tr>
+          <tr><td><code>KEY_POOL_SECRET</code></td><td><code>ADMIN_TOKEN</code></td><td>Encrypts upstream keys stored by the console.</td></tr>
+          <tr><td><code>PROVIDER_KEYS_JSON</code></td><td>empty</td><td>Read-only pool keys from config.</td></tr>
         </tbody>
       </table></div>
       <p style="margin-top:16px">The full list is in the <a href="https://github.com/uurtech/tokener#%EF%B8%8F-configuration">README</a>.</p>
@@ -87,7 +104,7 @@ npx cdk deploy      <span class="c-comment"># ~8 min</span></code></pre>
       <h2 id="testing">Testing</h2>
       <pre><code>cd gateway
 npm test         <span class="c-comment"># unit tests (vitest)</span>
-npm run smoke    <span class="c-comment"># end-to-end against a fake Bedrock upstream</span></code></pre>
+npm run smoke    <span class="c-comment"># end-to-end against fake Bedrock + Anthropic upstreams, incl. key-pool failover</span></code></pre>
 
       <h2 id="limitations">Limitations</h2>
       <p>Bridging needs ongoing maintenance as Claude Code adds beta fields. Prices are estimates; Cost Explorer is the source of truth. Budgets reset daily at UTC midnight. Structured outputs and server-side tools are not available on Bedrock.</p>

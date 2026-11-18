@@ -35,7 +35,8 @@ export interface RuntimeClientLike {
   countTokens(modelId: string, body: Uint8Array, signal: AbortSignal): Promise<{ inputTokens?: number; requestId?: string }>;
 }
 
-export function sdkRuntimeClient(region: string, endpoint?: string, requestTimeoutMs = 0): RuntimeClientLike {
+/** @param bearerToken A Bedrock API key for this client only (pool keys); otherwise the default credential chain applies. */
+export function sdkRuntimeClient(region: string, endpoint?: string, requestTimeoutMs = 0, bearerToken?: string): RuntimeClientLike {
   // The SDK defaults this client to HTTP/2, which breaks behind HTTP/1.1-only proxies and test
   // endpoints. Plain HTTP/1.1 streams event streams just fine. requestTimeout covers the time to
   // first byte only; long streaming turns are not cut (socketTimeout is left at the SDK default).
@@ -43,6 +44,7 @@ export function sdkRuntimeClient(region: string, endpoint?: string, requestTimeo
     region,
     endpoint: endpoint || undefined,
     requestHandler: new NodeHttpHandler({ requestTimeout: requestTimeoutMs > 0 ? requestTimeoutMs : undefined, connectionTimeout: 10_000 }),
+    ...(bearerToken ? { token: { token: bearerToken }, authSchemePreference: ["httpBearerAuth"] } : {}),
   });
   return {
     async invoke(modelId, body, signal) {

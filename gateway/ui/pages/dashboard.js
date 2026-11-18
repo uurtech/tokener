@@ -20,6 +20,7 @@ export async function render(main, params, { navigate }) {
       <div class="card"><h2>By model</h2><table id="tModel" class="data"></table></div>
       <div class="card"><h2>By request class</h2><table id="tClass" class="data"></table><p class="muted small">main = primary conversation · subagent · auxiliary = titles/summaries · compaction</p></div>
     </div>
+    <div class="card hidden" id="keyCard"><h2>By upstream key <a class="link-btn" href="#/keys">manage keys →</a></h2><table id="tKey" class="data"></table></div>
     <div class="card">
       <h2>Most expensive sessions <a class="link-btn" href="#/sessions?day=${day}">all sessions →</a></h2>
       <table id="tSess" class="data"></table>
@@ -61,6 +62,12 @@ export async function render(main, params, { navigate }) {
   breakdown($("#tDev"), "Developer", o.byDeveloper, (k) => ({ developer: k }));
   breakdown($("#tModel"), "Model", o.byModel.map((r) => ({ ...r, label: shortModel(r.key) })), (k) => ({ model: k }));
   breakdown($("#tClass"), "Class", o.byClass, (k) => ({ class: k }));
+  if ((o.byKey || []).some((r) => r.key !== "env")) {
+    let labels = {};
+    try { labels = Object.fromEntries((await api("/keys")).keys.map((k) => [k.id, `${k.label} (${k.kind})`])); } catch { /* ids are fine */ }
+    $("#keyCard").classList.remove("hidden");
+    breakdown($("#tKey"), "Key", o.byKey.map((r) => ({ ...r, label: r.key === "env" ? "gateway credentials" : labels[r.key] || r.key })));
+  }
 
   $("#tSess").innerHTML = o.topSessions.length
     ? `<tr><th>Session</th><th>Developer</th><th class="num">Turns</th><th class="num">Output</th><th class="num">Cost</th></tr>` +

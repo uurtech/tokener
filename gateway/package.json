@@ -1,6 +1,6 @@
 {
   "name": "claude-bedrock-gateway",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -12,7 +12,7 @@
     "dev": "tsx src/server.ts",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "smoke": "node test/smoke/smoke-local.mjs",
+    "smoke": "node test/smoke/smoke-local.mjs && node test/smoke/smoke-keypool.mjs",
     "local": "node scripts/local.mjs"
   },
   "dependencies": {

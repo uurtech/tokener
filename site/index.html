@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>tokener: cut the token cost of Claude Code on Amazon Bedrock</title>
-<meta name="description" content="tokener is a drop-in API gateway that measures and cuts the token cost of Claude Code on Amazon Bedrock.">
+<title>tokener: one endpoint for Claude Code, many Anthropic & Bedrock keys</title>
+<meta name="description" content="tokener is a drop-in gateway for Claude Code: pool several Anthropic or Amazon Bedrock API keys behind one endpoint with automatic failover, and measure and cut the token cost.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪙</text></svg>">
 <link rel="stylesheet" href="assets/style.css">
 </head>
@@ -19,9 +19,9 @@
 <main>
 <section class="hero">
   <div class="container">
-    <p class="eyebrow">Open source · MIT · v0.1.0</p>
-    <h1>Claude Code on Amazon Bedrock, <span class="grad">without the token bill shock.</span></h1>
-    <p class="lead">tokener is a drop-in API gateway that measures and cuts the token cost of Claude Code. Developers install nothing. They get a URL and a personal token, and the gateway does the rest.</p>
+    <p class="eyebrow">Open source · MIT · v0.2.0 · new: key pool with automatic failover</p>
+    <h1>One endpoint. Many keys. <span class="grad">No more rate-limit walls.</span></h1>
+    <p class="lead">tokener is a drop-in gateway for Claude Code. Put API keys from five Anthropic organizations or AWS accounts behind it and your team gets roughly five times the headroom. When one key hits its limit, the next one takes over before the developer notices. It also measures and cuts what every token costs. Developers install nothing: they get a URL and a personal token.</p>
     <div class="btn-row">
       <a class="btn btn-primary" href="docs.html">Get started in 5 minutes</a>
       <a class="btn btn-ghost" href="https://github.com/uurtech/tokener">View on GitHub</a>
@@ -32,11 +32,27 @@
 <section>
   <div class="container">
     <div class="grid grid-4">
-      <div class="stat"><div class="num">15–20%</div><div class="label">lower cost with safe policies</div></div>
-      <div class="stat"><div class="num">30–35%</div><div class="label">with effort tuning on top</div></div>
-      <div class="stat"><div class="num">~$75</div><div class="label">monthly infrastructure cost</div></div>
+      <div class="stat"><div class="num">N× limits</div><div class="label">pool keys from N Anthropic orgs or AWS accounts behind one URL</div></div>
+      <div class="stat"><div class="num">0 lost turns</div><div class="label">a 429 is retried on the next key before it reaches Claude Code</div></div>
+      <div class="stat"><div class="num">15–35%</div><div class="label">lower token cost with routing and effort policies</div></div>
       <div class="stat"><div class="num">No install</div><div class="label">needed on developer laptops</div></div>
     </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>Stop raising limits. Add keys instead.</h2>
+    <p class="section-lead">One API key means one rate limit and one spend cap for the whole team. On a busy afternoon everyone hits the same wall at the same time. tokener spreads the load over every key you give it and switches keys without anyone noticing.</p>
+    <div class="grid grid-3">
+      <div class="card"><div class="icon">🔁</div><h3>Rotation that keeps the cache warm</h3><p>New Claude Code sessions are spread across keys, and each session stays on its key, so the prompt cache keeps working. Round-robin, fill-first and least-used strategies are also available.</p></div>
+      <div class="card"><div class="icon">🛟</div><h3>Transparent failover</h3><p>A 429, 529, 5xx, rejected key or "credit balance too low" answer puts the key on cooldown, and the <em>same request</em> is retried on the next key. Claude Code just gets its answer.</p></div>
+      <div class="card"><div class="icon">📉</div><h3>Switches before the wall</h3><p>tokener reads Anthropic's rate-limit headers. When a key drops below 5% of any limit, new work moves to another key before the first 429 arrives.</p></div>
+      <div class="card"><div class="icon">🧩</div><h3>Anthropic and Bedrock, mixed</h3><p>Combine <code>sk-ant-…</code> keys and Bedrock API keys in one pool. Limits apply per Anthropic organization and per AWS account and region, so keys from separate orgs and accounts each add their own quota.</p></div>
+      <div class="card"><div class="icon">🎯</div><h3>Per-key caps and analytics</h3><p>Give any key a daily token or USD cap. See requests, tokens, cost, failovers, live sessions and remaining rate limit for every key.</p></div>
+      <div class="card"><div class="icon">🔐</div><h3>Keys stay secret</h3><p>Secrets are encrypted at rest with AES-256-GCM, tested with a free <code>count_tokens</code> call when added, and never shown again. Developers never see them.</p></div>
+    </div>
+    <figure class="shot" style="margin-top:28px"><img src="assets/img/ui-keys.png" alt="tokener upstream keys page: five keys, one cooling down after a 429, one parked near its rate limit" loading="lazy"></figure>
   </div>
 </section>
 
@@ -70,7 +86,7 @@
 
 <section class="cta">
   <div class="container">
-    <h2>Two lines in settings.json. That's the whole rollout.</h2>
+    <h2>Two lines in settings.json. Every key you own behind them.</h2>
     <p class="section-lead" style="margin-left:auto;margin-right:auto">Run it locally against your own AWS credentials today, then deploy to your AWS account with one CDK command.</p>
     <div class="btn-row">
       <a class="btn btn-primary" href="docs.html">Read the quick start</a>

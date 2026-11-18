@@ -9,12 +9,13 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)
 ![Amazon Bedrock](https://img.shields.io/badge/Amazon%20Bedrock-Mantle%20%7C%20Runtime-ff9900?logo=amazonwebservices&logoColor=white)
 ![AWS CDK](https://img.shields.io/badge/AWS%20CDK-v2-232f3e?logo=amazonwebservices&logoColor=white)
-![Version](https://img.shields.io/badge/version-0.1.0-6b7280)
+![Version](https://img.shields.io/badge/version-0.2.0-6b7280)
 
-**A drop-in API gateway that measures and cuts the token cost of Claude Code on Amazon Bedrock.**<br>
+**A drop-in API gateway for Claude Code: many Anthropic / Amazon Bedrock keys behind one endpoint, with automatic failover, plus cost visibility and control.**<br>
 Developers install nothing. They get a URL and a personal token, and the gateway handles the rest.
 
 [Quick start](#-quick-start-local-5-minutes) ·
+[Key pool](#-key-pool-many-keys-one-endpoint) ·
 [Features](#-features) ·
 [Admin console](#-admin-console) ·
 [Deploy to AWS](#-deploy-to-aws) ·
@@ -66,6 +67,39 @@ header; once the limit is passed it can warn, downgrade to a cheaper model, or b
 
 **Expected impact:** 15–20% lower cost with the safe policies, and 30–35% with effort tuning on top.
 Infrastructure costs about **$75/month**. Assumptions and math are in [docs/COST_MODEL.md](docs/COST_MODEL.md) (Turkish).
+
+## 🔁 Key pool: many keys, one endpoint
+
+Put several **Anthropic API keys** (`sk-ant-…`) and/or **Bedrock API keys** behind the gateway. Developers keep one
+`ANTHROPIC_BASE_URL` and one personal token. The gateway decides which key serves each request, and when a key runs out
+it moves on before the developer notices.
+
+<div align="center"><img src="docs/ui-keys.png" alt="Upstream keys" width="92%"></div>
+
+| | |
+|---|---|
+| 🔁 **Rotation** | `session` (default): new sessions are spread over the keys and each session stays on its key, so the prompt cache stays warm. Also `round-robin`, `fill-first` (by priority) and `least-used`. |
+| 🛟 **Transparent failover** | 429, 529/503, 5xx, 401/403 and "credit balance too low" put the key on cooldown, and the **same request** is retried on the next key. Nothing has been streamed yet, so Claude Code only sees the successful answer. Request errors (bad body, unknown model) are forwarded unchanged. |
+| 📉 **Proactive switching** | `anthropic-ratelimit-*-remaining` headers are tracked per key. Below `softLimitPct` (5%) the key is parked until its reset time and used only as a last resort. |
+| ⏱ **Honest cooldowns** | Cooldowns follow `retry-after` and the reset headers. Repeated failures back off exponentially. When every key is out, the client gets a 429 with a real `retry-after`, or the gateway's own AWS credentials take over if `envFallback` is on. |
+| 🎯 **Per-key caps** | Optional daily token / USD caps per key. |
+| 📊 **Per-key analytics** | Requests, tokens, cost, failovers, live sessions and remaining rate limit per key. Every request records the key that served it (`x-gateway-key` header, Requests page, Dashboard "By upstream key"). |
+| 🔐 **Secrets** | AES-256-GCM at rest (`KEY_POOL_SECRET`, defaults to `ADMIN_TOKEN`). Tested with a free `count_tokens` call on save, shown only as their last four characters, never logged. |
+
+> [!NOTE]
+> Anthropic applies rate and spend limits **per organization**, and Bedrock quotas are **per AWS account and region**.
+> Keys from the same organization share one limit. To add headroom, use keys from separate organizations or accounts,
+> and check that your provider agreements allow how you combine them.
+
+Keys can also come from config (read-only in the UI):
+
+```bash
+PROVIDER_KEYS_JSON='[{"label":"org-a","kind":"anthropic","key":"sk-ant-..."},
+                     {"label":"acct-2","kind":"bedrock","key":"ABSK...","region":"us-west-2","api":"mantle"}]'
+```
+
+Admin API: `GET/POST /admin/api/keys`, `PATCH/DELETE /admin/api/keys/:id`, `POST /admin/api/keys/:id/test|reset`,
+`PUT /admin/api/keys/settings` (`strategy`, `envFallback`, `softLimitPct`, `maxAttempts`).
 
 ## 🏗 Architecture
 
@@ -121,6 +155,8 @@ Nothing changes for developers either way.
 | 🧷 **Bedrock bridging** | Strips beta fields and headers that Bedrock rejects, so you avoid `400 Extra inputs are not permitted`. |
 | 💸 **Budgets & token limits** | Daily per-developer limits with `warn` / `downgrade` / `block`, reported in `x-gateway-budget*` headers. |
 | 📚 **Live model catalog** | Builds `/v1/models` from Bedrock (`ListFoundationModels` + `ListInferenceProfiles`), so `/model` just works. |
+| 🔁 **Key pool** | Several Anthropic / Bedrock keys behind one URL with rotation, transparent failover and per-key caps ([details](#-key-pool-many-keys-one-endpoint)). |
+| 🙋 **Self-service** | `GET /v1/me` with a developer token returns today's spend, tokens, cache hit rate and limits. |
 | 📊 **Observability** | CloudWatch EMF metrics, a dashboard and alarms, plus an in-app dashboard with a 14-day trend. |
 | 🔐 **Privacy by design** | Conversation content is never stored. Tokens are kept only as hashes, and logs contain numbers only. |
 | 🛒 **Marketplace-ready** | A hardened CloudFormation template with HTTPS only, private subnets, Secrets Manager and `RegisterUsage` metering. |
@@ -289,6 +325,9 @@ recommended: every policy off, bridging on.
 | `BEDROCK_PROFILE_PREFIX` | `us` | Inference profile prefix added to bare model ids in runtime mode (`us`, `global`, `eu`, `apac`, `none`). |
 | `MODEL_CATALOG_ENABLED` | `true` | Builds the model list live from Bedrock. When off, only `MODEL_MAP_JSON` aliases are listed. |
 | `MODEL_CATALOG_TTL_MS` | `600000` | How long the catalog is cached (10 min). |
+| `KEY_POOL_SECRET` | `ADMIN_TOKEN` | Encrypts upstream pool keys stored from the console. Changing it makes stored keys unreadable (they show as `error`). `npm run local` keeps one in `data/keypool.secret`. |
+| `PROVIDER_KEYS_JSON` | empty | Read-only pool keys: `[{"label","kind":"anthropic"\|"bedrock","key","region?","api?","priority?","dailyTokenLimit?","dailyBudgetUsd?"}]`. |
+| `ANTHROPIC_API_URL` | `https://api.anthropic.com` | Default base URL for Anthropic pool keys. |
 | `UPSTREAM_TIMEOUT_MS` | `120000` | How long to wait for Bedrock's response headers before returning 504. There is no limit once streaming starts. |
 
 Setting `alertEmail` sends alarms by e-mail. Setting `domainName` + `certificateArn` adds an HTTPS listener and an HTTP→HTTPS redirect.
@@ -364,14 +403,16 @@ npm test          # unit tests (vitest)
 npm run smoke     # end-to-end checks against a fake Bedrock upstream: no AWS calls
 ```
 
-The smoke suite checks that SSE is passed through byte for byte, along with model mapping, bridging, effort fill, operator prompt placement,
+The smoke suites check key-pool rotation, failover, parking and secret handling against fake Anthropic and Bedrock upstreams, and that SSE is passed through byte for byte, along with model mapping, bridging, effort fill, operator prompt placement,
 tool_result trimming, error passthrough and EMF metric output.
 
 ## 🗺 Roadmap
 
 - [ ] A separate model per subagent type (`x-claude-code-agent-type`)
 - [ ] Prompt-cache pre-warming after compaction
-- [ ] Self-service dashboard for developers
+- [x] Several upstream keys behind one endpoint with failover (v0.2)
+- [x] Developer self-service usage endpoint `/v1/me` (v0.2)
+- [ ] Self-service dashboard page for developers
 
 ## 🤝 Contributing
 

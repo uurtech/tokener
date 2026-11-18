@@ -1,5 +1,6 @@
 import type { Usage } from "../pricing.js";
 import type { Policy } from "../policy-state.js";
+import type { PoolDoc } from "../keypool.js";
 
 export interface DeveloperRecord {
   developerId: string;
@@ -55,6 +56,10 @@ export interface RequestRecord {
   stream: boolean;
   notes: string[];
   errorType?: string;
+  /** Upstream key that served the request (pool key id, or "env" for the gateway's own credentials). */
+  providerKey?: string;
+  /** Upstream attempts that failed over before this one answered. */
+  failovers?: number;
 }
 
 export interface DailyTotals {
@@ -78,6 +83,8 @@ export interface Overview {
   byDeveloper: BreakdownRow[];
   byModel: BreakdownRow[];
   byClass: BreakdownRow[];
+  /** Per upstream key (pool). */
+  byKey: BreakdownRow[];
   byHour: { hour: number; costUsd: number; requests: number }[];
   topSessions: { sessionId: string; developerId: string; costUsd: number; requests: number; outputTokens: number }[];
   source: "sqlite" | "dynamo+memory";
@@ -90,6 +97,8 @@ export interface UsageStore {
   recentRequests(opts: RequestFilter): Promise<RequestRecord[]>;
   /** Daily totals for the last `days` UTC days (oldest first, missing days filled with zeros). */
   trend(days: number): Promise<TrendPoint[]>;
+  /** Today's totals for one upstream pool key (daily caps, restart seeding). */
+  keyTotals(providerKey: string): Promise<DailyTotals>;
 }
 
 export interface RequestFilter {
@@ -123,11 +132,17 @@ export interface PolicyStore {
   save(p: Policy): Promise<void>;
 }
 
+export interface PoolStore {
+  load(): Promise<PoolDoc | null>;
+  save(doc: PoolDoc): Promise<void>;
+}
+
 export interface Store {
   kind: "sqlite" | "dynamo";
   keys: KeyStore;
   usage: UsageStore;
   policy: PolicyStore;
+  pool: PoolStore;
   audit: AuditStore;
   close(): Promise<void>;
 }
@@ -189,6 +204,7 @@ export function aggregate(day: string, recs: RequestRecord[], source: Overview["
     byDeveloper: group((r) => r.developerId),
     byModel: group((r) => r.model),
     byClass: group((r) => r.requestClass),
+    byKey: group((r) => r.providerKey ?? "env"),
     byHour: hours,
     topSessions: [...sess.values()].sort((a, b) => b.costUsd - a.costUsd).slice(0, 20),
     source,
