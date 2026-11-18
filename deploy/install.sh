@@ -8,6 +8,9 @@
 # the containers are updated to the latest image.
 set -euo pipefail
 
+# Everything runs inside main(), called on the last line: with `curl | bash` bash reads the script from stdin,
+# so the whole file must be parsed before any command (docker in particular) can touch stdin.
+main() {
 DOMAIN="${1:-${DOMAIN:-}}"
 DIR="${TOKENER_DIR:-/opt/tokener}"
 RAW="${TOKENER_RAW:-https://raw.githubusercontent.com/uurtech/tokener/master/deploy}"
@@ -51,14 +54,14 @@ else
 fi
 
 echo "==> starting tokener"
-docker compose pull
-docker compose up -d
+docker compose pull </dev/null
+docker compose up -d </dev/null
 
 ADMIN_TOKEN="$(grep '^ADMIN_TOKEN=' .env | cut -d= -f2-)"
 if [[ "$DOMAIN" == :* ]]; then BASE="http://$(curl -fsS https://checkip.amazonaws.com 2>/dev/null || hostname -I | awk '{print $1}')${DOMAIN#:80}"; else BASE="https://$DOMAIN"; fi
 
 for _ in $(seq 1 30); do
-  if docker compose exec -T tokener wget -qO- http://127.0.0.1:8080/health >/dev/null 2>&1; then break; fi
+  if docker compose exec -T tokener wget -qO- http://127.0.0.1:8080/health </dev/null >/dev/null 2>&1; then break; fi
   sleep 2
 done
 
@@ -74,3 +77,6 @@ cat <<EOF
         then Developers → create a developer and send them the settings.json snippet.
   Update later: cd $DIR && docker compose pull && docker compose up -d
 EOF
+}
+
+main "$@"
